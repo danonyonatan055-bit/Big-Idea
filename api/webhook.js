@@ -188,7 +188,8 @@ async function handleMessage(msg) {
   }
 
   const state = await store.getState();
-  if (state.config.mode === "closed") {
+  // ALWAYS_ANSWER=1 (set in Vercel) makes the AI answer at any hour, for testing.
+  if (state.config.mode === "closed" && process.env.ALWAYS_ANSWER !== "1") {
     const t = store.now().time;
     if (t >= state.config.open && t < state.config.close) {
       console.log("Skipped: business is open (" + t + "), mode is closed-only");
