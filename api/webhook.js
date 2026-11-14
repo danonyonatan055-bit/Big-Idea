@@ -82,6 +82,8 @@ function systemPrompt(state, phone) {
     "- Cuando tengas todo, usa la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. Confirma la cita solo si la herramienta responde ok.",
     "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
     "- Después de reservar, confirma en un mensaje corto: servicio, día, hora y nombre. No ofrezcas otras horas ni te disculpes.",
+    "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
+    "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
     "- Si piden una hora que no está en la lista, o no hay horas, di que el equipo le escribirá cuando abra.",
     "- Si no sabes algo, di que el equipo responderá cuando abra. No inventes precios, horas ni datos.",
     "- No des diagnósticos ni consejos médicos. En una urgencia, indica que llame al negocio."
@@ -100,6 +102,17 @@ const TOOLS = [{
       hora: { type: "string", description: "Hora en formato HH:MM" }
     },
     required: ["nombre", "servicio", "fecha", "hora"]
+  }
+}, {
+  name: "cancelar_cita",
+  description: "Cancela una cita que este cliente ya tiene reservada y libera esa hora. Devuelve ok si quedó cancelada.",
+  input_schema: {
+    type: "object",
+    properties: {
+      fecha: { type: "string", description: "Fecha de la cita en formato YYYY-MM-DD" },
+      hora: { type: "string", description: "Hora de la cita en formato HH:MM" }
+    },
+    required: ["fecha", "hora"]
   }
 }];
 
@@ -123,9 +136,26 @@ async function book(input, phone) {
   return { ok: true, booking: booking };
 }
 
+async function cancel(input, phone) {
+  const state = await store.getState();
+  const fecha = String(input.fecha || "").trim();
+  let hora = String(input.hora || "").trim();
+  if (/^\d:\d{2}$/.test(hora)) hora = "0" + hora;
+  const mine = state.bookings.filter((b) => b.phone === phone);
+  let booking = mine.find((b) => b.date === fecha && b.time === hora);
+  if (!booking && mine.length === 1) booking = mine[0]; // only one booking: that is the one
+  if (!booking) return { ok: false, error: "Este cliente no tiene una cita en esa fecha y hora." };
+  state.bookings = state.bookings.filter((b) => b !== booking);
+  const slot = state.slots.find((s) => s.date === booking.date && s.time === booking.time);
+  if (slot) slot.taken = false;
+  await store.saveState(state);
+  return { ok: true, booking: booking };
+}
+
 async function answer(state, history, text, phone) {
   const messages = history.concat([{ role: "user", content: text }]);
   const made = [];
+  const cancelled = [];
   for (let i = 0; i < 4; i++) {
     const resp = await callClaude({
       model: MODEL, max_tokens: 500, system: systemPrompt(state, phone), tools: TOOLS, messages: messages
@@ -135,8 +165,9 @@ async function answer(state, history, text, phone) {
       const results = [];
       for (const block of resp.content) {
         if (block.type !== "tool_use") continue;
-        const res = await book(block.input || {}, phone);
-        if (res.ok) made.push(res.booking);
+        const isCancel = block.name === "cancelar_cita";
+        const res = isCancel ? await cancel(block.input || {}, phone) : await book(block.input || {}, phone);
+        if (res.ok) (isCancel ? cancelled : made).push(res.booking);
         results.push({
           type: "tool_result", tool_use_id: block.id,
           content: JSON.stringify(res.ok ? { ok: true } : { ok: false, error: res.error }),
@@ -148,9 +179,9 @@ async function answer(state, history, text, phone) {
       continue;
     }
     const out = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-    return { text: out || "Listo.", made: made };
+    return { text: out || "Listo.", made: made, cancelled: cancelled };
   }
-  return { text: "El equipo te responderá cuando abra.", made: made };
+  return { text: "El equipo te responderá cuando abra.", made: made, cancelled: cancelled };
 }
 
 // Owner writes "Mañana: 9, 12 y 1" or "Hoy: 3 y 4" to set the open hours.
@@ -217,6 +248,12 @@ async function handleMessage(msg) {
 
   history.push({ role: "user", content: text }, { role: "assistant", content: res.text });
   await store.redis(["SET", key, JSON.stringify(history.slice(-12)), "EX", "86400"]);
+
+  for (const b of res.cancelled) {
+    for (const o of owners()) {
+      await sendWhatsApp(o, "Cita cancelada: " + b.name + " · " + b.service + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) + " · tel. " + b.phone + ". Esa hora quedó libre otra vez.");
+    }
+  }
 
   // Tell the owner about each new booking (works if the owner wrote to the number in the last 24 hours).
   for (const b of res.made) {
