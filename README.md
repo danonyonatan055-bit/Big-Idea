@@ -78,6 +78,9 @@ The owner can also set hours by WhatsApp. From a phone listed in `OWNER_NUMBERS`
 
 | Name | Default | What it does |
 | --- | --- | --- |
+| `RESEND_API_KEY` | none | Key from resend.com. With it, booking and cancellation alerts go by email to the business email set on the company page. |
+| `EMAIL_FROM` | `Recepcionista <onboarding@resend.dev>` | Sender address. The default only delivers to the email of the Resend account; use a verified domain for real clients. |
+| `ALWAYS_ANSWER` | none | Set to `1` to answer at any hour, ignoring the closed-only mode. |
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Which Claude model answers |
 | `GRAPH_VERSION` | `v25.0` | Meta API version |
 | `TIMEZONE` | `America/Panama` | Time zone for hours and dates |

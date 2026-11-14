@@ -23,6 +23,26 @@ async function sendWhatsApp(to, body) {
   return r.ok;
 }
 
+// Alert the business. Email is used when a business email and RESEND_API_KEY are set;
+// otherwise the alert goes by WhatsApp to OWNER_NUMBERS.
+async function notifyBusiness(state, subject, text) {
+  const to = (state.config.email || process.env.OWNER_EMAIL || "").trim();
+  if (to && process.env.RESEND_API_KEY) {
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + process.env.RESEND_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: process.env.EMAIL_FROM || "Recepcionista <onboarding@resend.dev>",
+        to: [to], subject: subject, text: text
+      })
+    });
+    if (r.ok) { console.log("Email alert sent"); return; }
+    console.error("Email alert failed", r.status, await r.text());
+    return;
+  }
+  for (const o of owners()) await sendWhatsApp(o, subject + "\n" + text);
+}
+
 async function callClaude(payload) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -249,16 +269,20 @@ async function handleMessage(msg) {
   history.push({ role: "user", content: text }, { role: "assistant", content: res.text });
   await store.redis(["SET", key, JSON.stringify(history.slice(-12)), "EX", "86400"]);
 
-  for (const b of res.cancelled) {
-    for (const o of owners()) {
-      await sendWhatsApp(o, "Cita cancelada: " + b.name + " · " + b.service + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) + " · tel. " + b.phone + ". Esa hora quedó libre otra vez.");
+  // Tell the business about each cancellation and each new booking.
+  if (res.cancelled.length || res.made.length) {
+    const fresh = await store.getState();
+    for (const b of res.cancelled) {
+      await notifyBusiness(fresh,
+        "Cita cancelada: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
+        "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
+        "\nTeléfono: " + b.phone + "\n\nEsa hora quedó libre otra vez.");
     }
-  }
-
-  // Tell the owner about each new booking (works if the owner wrote to the number in the last 24 hours).
-  for (const b of res.made) {
-    for (const o of owners()) {
-      await sendWhatsApp(o, "Nueva cita: " + b.name + " · " + b.service + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) + " · tel. " + b.phone);
+    for (const b of res.made) {
+      await notifyBusiness(fresh,
+        "Nueva cita: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
+        "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
+        "\nTeléfono: " + b.phone + "\n\nEsa hora ya no se ofrece a otros clientes.");
     }
   }
 }

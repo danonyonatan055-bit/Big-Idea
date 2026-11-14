@@ -72,6 +72,13 @@ li small { color:var(--muted); display:block; }
     </section>
 
     <section class="card">
+      <h2>Avisos al negocio</h2>
+      <p class="hint">A este correo llega un aviso cada vez que la asistente reserva o cancela una cita.</p>
+      <label for="email">Correo del negocio</label>
+      <input id="email" type="email" placeholder="citas@minegocio.com">
+    </section>
+
+    <section class="card">
       <h2>4. Cuándo responde</h2>
       <label for="mode">Modo</label>
       <select id="mode">
@@ -120,6 +127,7 @@ li small { color:var(--muted); display:block; }
       $("name").value = d.config.name || "";
       $("info").value = d.config.info || "";
       $("services").value = d.config.services || "";
+      $("email").value = d.config.email || "";
       $("mode").value = d.config.mode;
       $("open").value = d.config.open;
       $("close").value = d.config.close;
@@ -181,7 +189,7 @@ li small { color:var(--muted); display:block; }
   $("saveConfig").addEventListener("click", function () {
     say("Guardando…");
     api("POST", { config: {
-      name: $("name").value, info: $("info").value, services: $("services").value,
+      name: $("name").value, info: $("info").value, services: $("services").value, email: $("email").value,
       mode: $("mode").value, open: $("open").value, close: $("close").value
     } })
       .then(function (d) { render(d, true); say("Guardado. La asistente ya usa estos datos.", "ok"); })

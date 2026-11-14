@@ -40,6 +40,7 @@ module.exports = async (req, res) => {
           name: str(c.name, 100) || "Mi negocio",
           info: str(c.info, 6000),
           services: str(c.services, 4000),
+          email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str(c.email, 200).trim()) ? str(c.email, 200).trim() : "",
           mode: c.mode === "closed" ? "closed" : "always",
           open: /^\d{2}:\d{2}$/.test(c.open) ? c.open : "08:00",
           close: /^\d{2}:\d{2}$/.test(c.close) ? c.close : "17:00"
