@@ -19,6 +19,7 @@ async function sendWhatsApp(to, body) {
     body: JSON.stringify({ messaging_product: "whatsapp", to: to, type: "text", text: { body: body } })
   });
   if (!r.ok) console.error("WhatsApp send failed", r.status, await r.text());
+  else console.log("WhatsApp reply sent to ..." + String(to).slice(-4));
   return r.ok;
 }
 
@@ -160,7 +161,8 @@ async function handleMessage(msg) {
   const from = msg.from;
   // Meta can deliver the same message twice. Answer each one only once.
   const first = await store.redis(["SET", "msg:" + msg.id, "1", "NX", "EX", "3600"]);
-  if (first === null) return;
+  if (first === null) { console.log("Skipped: message already handled"); return; }
+  console.log("Incoming " + msg.type + " message from ..." + String(from).slice(-4));
 
   if (msg.type !== "text" || !msg.text || !msg.text.body) {
     await sendWhatsApp(from, "Por ahora solo puedo leer mensajes de texto. ¿Me escribes tu consulta?");
@@ -188,7 +190,10 @@ async function handleMessage(msg) {
   const state = await store.getState();
   if (state.config.mode === "closed") {
     const t = store.now().time;
-    if (t >= state.config.open && t < state.config.close) return; // business is open: staff answer
+    if (t >= state.config.open && t < state.config.close) {
+      console.log("Skipped: business is open (" + t + "), mode is closed-only");
+      return; // business is open: staff answer
+    }
   }
 
   const key = "chat:" + digits(from);
@@ -230,6 +235,10 @@ module.exports = async (req, res) => {
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value || {};
+        if (!(value.messages || []).length) {
+          const st = (value.statuses || []).map((x) => x.status + (x.errors ? " " + JSON.stringify(x.errors) : "")).join(", ");
+          console.log("Webhook without message: field=" + change.field + (st ? " statuses=" + st : ""));
+        }
         for (const msg of value.messages || []) {
           await handleMessage(msg);
         }
