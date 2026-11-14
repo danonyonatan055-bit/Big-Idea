@@ -38,7 +38,7 @@ async function callClaude(payload) {
   return j;
 }
 
-function systemPrompt(state) {
+function systemPrompt(state, phone) {
   const t = store.now();
   const c = state.config;
   const free = state.slots.filter((s) => !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
@@ -52,6 +52,10 @@ function systemPrompt(state) {
           byDate[d].sort().map((x) => x + " (" + store.fmt12(x) + ")").join(", ");
       }).join("\n")
     : "- No hay horas disponibles.";
+  const own = state.bookings.filter((b) => b.phone === phone && b.date >= t.date);
+  const mine = own.length
+    ? own.map((b) => "- " + b.date + " (" + store.dayLabel(b.date) + ") a las " + b.time + " (" + store.fmt12(b.time) + "): " + b.service + ", a nombre de " + b.name).join("\n")
+    : "- Ninguna.";
   return [
     "Eres la recepcionista virtual de " + c.name + ". Atiendes por WhatsApp a clientes.",
     "Responde en el idioma del cliente (español por defecto), con mensajes cortos, tono amable y sin formato markdown.",
@@ -68,9 +72,14 @@ function systemPrompt(state) {
     "Horas disponibles (solo ofrece estas):",
     slotLines,
     "",
+    "Citas que ESTE cliente ya tiene reservadas:",
+    mine,
+    "",
     "Reglas:",
     "- Para reservar necesitas: nombre del cliente, servicio, fecha y hora. Pide lo que falte, una cosa a la vez.",
     "- Cuando tengas todo, usa la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. Confirma la cita solo si la herramienta responde ok.",
+    "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
+    "- Después de reservar, confirma en un mensaje corto: servicio, día, hora y nombre. No ofrezcas otras horas ni te disculpes.",
     "- Si piden una hora que no está en la lista, o no hay horas, di que el equipo le escribirá cuando abra.",
     "- Si no sabes algo, di que el equipo responderá cuando abra. No inventes precios, horas ni datos.",
     "- No des diagnósticos ni consejos médicos. En una urgencia, indica que llame al negocio."
@@ -117,7 +126,7 @@ async function answer(state, history, text, phone) {
   const made = [];
   for (let i = 0; i < 4; i++) {
     const resp = await callClaude({
-      model: MODEL, max_tokens: 500, system: systemPrompt(state), tools: TOOLS, messages: messages
+      model: MODEL, max_tokens: 500, system: systemPrompt(state, phone), tools: TOOLS, messages: messages
     });
     if (resp.stop_reason === "tool_use") {
       messages.push({ role: "assistant", content: resp.content });
