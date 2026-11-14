@@ -170,6 +170,21 @@ async function handleMessage(msg) {
 
   if (owners().indexOf(digits(from)) !== -1 && (await ownerCommand(text, from))) return;
 
+  // Privacy: anyone can ask to have their chat and bookings removed.
+  if (/borrar mis datos|delete my data/i.test(text)) {
+    await store.redis(["DEL", "chat:" + digits(from)]);
+    const st = await store.getState();
+    const mine = st.bookings.filter((b) => b.phone === digits(from));
+    mine.forEach((b) => {
+      const slot = st.slots.find((s) => s.date === b.date && s.time === b.time);
+      if (slot) slot.taken = false;
+    });
+    st.bookings = st.bookings.filter((b) => b.phone !== digits(from));
+    await store.saveState(st);
+    await sendWhatsApp(from, "Listo. Borramos tu conversación y tus citas guardadas.");
+    return;
+  }
+
   const state = await store.getState();
   if (state.config.mode === "closed") {
     const t = store.now().time;
