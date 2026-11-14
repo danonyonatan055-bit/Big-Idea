@@ -40,7 +40,7 @@ In the Vercel project, open Settings, then Environment Variables, and add:
 | `ANTHROPIC_API_KEY` | Your Claude API key |
 | `WHATSAPP_TOKEN` | The temporary access token from Meta |
 | `WHATSAPP_PHONE_NUMBER_ID` | The Phone number ID from Meta |
-| `VERIFY_TOKEN` | Any secret word you invent |
+| `VERIFY_TOKEN` | Optional. A secret word for Meta's check. If you skip it, the admin password is used. |
 | `ADMIN_PASSWORD` | Password for the company page (8 characters or more) |
 | `OWNER_NUMBERS` | The owner's phone with country code, for example `50760000000`. Separate several with commas. |
 
@@ -50,7 +50,7 @@ Then redeploy the project so it reads the new settings.
 
 1. In the Meta app, open WhatsApp, then Configuration.
 2. Callback URL: `https://YOUR-PROJECT.vercel.app/api/webhook`
-3. Verify token: the same word you used for `VERIFY_TOKEN`.
+3. Verify token: the same word you used for `VERIFY_TOKEN`, or the admin password if you skipped it.
 4. Save, then subscribe to the `messages` field.
 
 ### 6. Train the AI

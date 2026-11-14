@@ -199,7 +199,9 @@ module.exports = async (req, res) => {
   if (req.method === "GET") {
     // Meta checks the URL once when you save it in the dashboard.
     const q = req.query || {};
-    if (q["hub.mode"] === "subscribe" && q["hub.verify_token"] && q["hub.verify_token"] === process.env.VERIFY_TOKEN) {
+    // The verify word is VERIFY_TOKEN if set, otherwise the admin password.
+    const expected = process.env.VERIFY_TOKEN || process.env.ADMIN_PASSWORD;
+    if (q["hub.mode"] === "subscribe" && expected && q["hub.verify_token"] === expected) {
       res.status(200).send(String(q["hub.challenge"]));
     } else {
       res.status(403).send("Forbidden");
