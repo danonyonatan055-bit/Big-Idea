@@ -1,0 +1,6 @@
+{
+  "name": "whatsapp-receptionist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI receptionist for WhatsApp: answers customers, quotes prices and books open hours."
+}

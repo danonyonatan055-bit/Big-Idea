@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Panel de la asistente</title>
+<style>
+:root { --bg:#eef3f1; --surface:#fff; --ink:#12302b; --muted:#5b716c; --line:#d3dfdb; --accent:#0c6b5d; --good:#1f7a3d; --good-bg:#dcf1e2; --bad:#a3271f; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui, "Segoe UI", sans-serif; }
+.wrap { max-width:720px; margin:0 auto; padding:24px 16px 48px; display:flex; flex-direction:column; gap:18px; }
+h1 { font-size:1.5rem; margin:0; }
+h2 { font-size:1.05rem; margin:0; }
+p.hint { margin:0; color:var(--muted); font-size:.92rem; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:10px; }
+label { font-weight:600; font-size:.95rem; }
+input, textarea, select { font:inherit; width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
+textarea { min-height:120px; resize:vertical; }
+.row { display:flex; gap:10px; flex-wrap:wrap; }
+.row > * { flex:1; min-width:140px; }
+button { font:inherit; font-weight:600; padding:10px 18px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+button:disabled { opacity:.5; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.chips { display:flex; flex-wrap:wrap; gap:8px; }
+.chip { font-size:.9rem; font-weight:600; padding:4px 10px; border-radius:999px; background:var(--good-bg); color:var(--good); }
+.chip.taken { background:#e6ecea; color:var(--muted); text-decoration:line-through; }
+ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+li { border:1px solid var(--line); border-left:4px solid var(--good); border-radius:8px; padding:8px 12px; }
+li small { color:var(--muted); display:block; }
+#status { min-height:1.4em; font-weight:600; }
+#status.bad { color:var(--bad); }
+#status.ok { color:var(--good); }
+[hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Panel de la asistente</h1>
+
+  <form id="login" class="card" autocomplete="off">
+    <label for="pw">Contraseña del negocio</label>
+    <input id="pw" type="password" required>
+    <button type="submit">Entrar</button>
+  </form>
+
+  <div id="panel" hidden style="display:flex;flex-direction:column;gap:18px">
+    <section class="card">
+      <h2>1. Horas disponibles</h2>
+      <p class="hint">Antes de cerrar, escribe las horas libres. Ejemplo: 9, 12 y 1. La asistente solo ofrece estas horas.</p>
+      <div class="row">
+        <div><label for="slotsDate">Día</label><input id="slotsDate" type="date"></div>
+        <div><label for="slotsText">Horas</label><input id="slotsText" type="text" placeholder="9, 12 y 1"></div>
+      </div>
+      <button id="saveSlots" type="button">Guardar horas</button>
+      <div class="chips" id="slots"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. Servicios y precios</h2>
+      <p class="hint">Uno por línea. Ejemplo: Limpieza dental: $45</p>
+      <textarea id="services" aria-label="Servicios y precios"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>3. Cómo debe responder</h2>
+      <p class="hint">Escribe todo lo que la asistente debe saber: dirección, horario, formas de pago, preguntas frecuentes y cómo quieres que hable.</p>
+      <label for="name">Nombre del negocio</label>
+      <input id="name" type="text">
+      <label for="info">Información e instrucciones</label>
+      <textarea id="info"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>4. Cuándo responde</h2>
+      <label for="mode">Modo</label>
+      <select id="mode">
+        <option value="always">Siempre (para pruebas)</option>
+        <option value="closed">Solo cuando el negocio está cerrado</option>
+      </select>
+      <div class="row">
+        <div><label for="open">Abre</label><input id="open" type="time"></div>
+        <div><label for="close">Cierra</label><input id="close" type="time"></div>
+      </div>
+    </section>
+
+    <button id="saveConfig" type="button">Guardar precios e instrucciones</button>
+    <div id="status" role="status"></div>
+
+    <section class="card">
+      <h2>Citas reservadas por la asistente</h2>
+      <ul id="bookings"></ul>
+    </section>
+  </div>
+</div>
+
+<script>
+(function () {
+  var pw = "";
+  var $ = function (id) { return document.getElementById(id); };
+  var status = $("status");
+
+  function say(msg, kind) { status.textContent = msg; status.className = kind || ""; }
+
+  function api(method, body) {
+    return fetch("/api/admin", {
+      method: method,
+      headers: { "x-admin-password": pw, "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok) throw new Error(j.error || "No se pudo guardar.");
+        return j;
+      });
+    });
+  }
+
+  function render(d, keepForm) {
+    if (!keepForm) {
+      $("name").value = d.config.name || "";
+      $("info").value = d.config.info || "";
+      $("services").value = d.config.services || "";
+      $("mode").value = d.config.mode;
+      $("open").value = d.config.open;
+      $("close").value = d.config.close;
+      $("slotsDate").value = d.tomorrow;
+    }
+    var slots = $("slots");
+    slots.textContent = "";
+    if (!d.slots.length) {
+      var none = document.createElement("p");
+      none.className = "hint";
+      none.textContent = "No hay horas guardadas.";
+      slots.appendChild(none);
+    }
+    d.slots.forEach(function (s) {
+      var el = document.createElement("span");
+      el.className = "chip" + (s.taken ? " taken" : "");
+      el.textContent = s.label + (s.taken ? " reservada" : "");
+      slots.appendChild(el);
+    });
+    var list = $("bookings");
+    list.textContent = "";
+    if (!d.bookings.length) {
+      var li0 = document.createElement("li");
+      li0.textContent = "Todavía no hay citas.";
+      list.appendChild(li0);
+    }
+    d.bookings.forEach(function (b) {
+      var li = document.createElement("li");
+      var top = document.createElement("b");
+      top.textContent = b.name + " · " + b.service;
+      var sub = document.createElement("small");
+      sub.textContent = b.label + " · tel. " + b.phone;
+      li.appendChild(top); li.appendChild(sub);
+      list.appendChild(li);
+    });
+  }
+
+  $("login").addEventListener("submit", function (e) {
+    e.preventDefault();
+    pw = $("pw").value;
+    api("GET").then(function (d) {
+      $("login").hidden = true;
+      $("panel").hidden = false;
+      render(d);
+    }).catch(function (err) {
+      pw = "";
+      $("pw").value = "";
+      $("pw").placeholder = err.message;
+    });
+  });
+
+  $("saveSlots").addEventListener("click", function () {
+    say("Guardando…");
+    api("POST", { slotsDate: $("slotsDate").value, slotsText: $("slotsText").value })
+      .then(function (d) { render(d, true); $("slotsText").value = ""; say("Horas guardadas.", "ok"); })
+      .catch(function (err) { say(err.message, "bad"); });
+  });
+
+  $("saveConfig").addEventListener("click", function () {
+    say("Guardando…");
+    api("POST", { config: {
+      name: $("name").value, info: $("info").value, services: $("services").value,
+      mode: $("mode").value, open: $("open").value, close: $("close").value
+    } })
+      .then(function (d) { render(d, true); say("Guardado. La asistente ya usa estos datos.", "ok"); })
+      .catch(function (err) { say(err.message, "bad"); });
+  });
+})();
+</script>
+</body>
+</html>
