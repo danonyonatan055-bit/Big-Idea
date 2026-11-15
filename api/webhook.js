@@ -28,6 +28,35 @@ async function sendWhatsApp(to, body) {
   return false;
 }
 
+// A message with two tap buttons: Confirmar cita / Cancelar.
+async function sendButtons(to, body, nonce) {
+  const payload = {
+    messaging_product: "whatsapp", to: to, type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: body },
+      action: { buttons: [
+        { type: "reply", reply: { id: "ok:" + nonce, title: "Confirmar cita" } },
+        { type: "reply", reply: { id: "no:" + nonce, title: "Cancelar" } }
+      ] }
+    }
+  };
+  for (let i = 0; i < 2; i++) {
+    try {
+      const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + process.env.WHATSAPP_PHONE_NUMBER_ID + "/messages", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + process.env.WHATSAPP_TOKEN, "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (r.ok) { console.log("WhatsApp buttons sent to ..." + String(to).slice(-4)); return true; }
+      console.error("WhatsApp buttons failed", r.status, await r.text());
+    } catch (err) { console.error("WhatsApp buttons threw", err); }
+    await wait(600);
+  }
+  // If buttons cannot be sent, the customer can still confirm by writing "sí".
+  return sendWhatsApp(to, body + "\n\nResponde SÍ para confirmar o NO para cancelar.");
+}
+
 async function sendOnce(to, body) {
   const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + process.env.WHATSAPP_PHONE_NUMBER_ID + "/messages", {
     method: "POST",
@@ -84,7 +113,7 @@ function describe(kind, b) {
   return kind + ": " + b.service + ", " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) + ", a nombre de " + b.name;
 }
 
-function systemPrompt(state, phone, acts) {
+function systemPrompt(state, phone, acts, pending) {
   const t = store.now();
   const c = state.config;
   const free = state.slots.filter((s) => !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
@@ -121,6 +150,9 @@ function systemPrompt(state, phone, acts) {
     "Citas que ESTE cliente tiene reservadas AHORA:",
     mine,
     "",
+    "Solicitud de cita que espera que el cliente toque el botón Confirmar (todavía NO está reservada):",
+    pending ? "- " + pending.servicio + ", " + pending.fecha + " (" + store.dayLabel(pending.fecha) + ") a las " + pending.hora + " (" + store.fmt12(pending.hora) + "), a nombre de " + pending.nombre : "- Ninguna.",
+    "",
     "Acciones que el sistema YA ejecutó para este cliente en este chat (son hechos reales, en orden):",
     (acts && acts.length) ? acts.map((a) => "- " + a).join("\n") : "- Ninguna todavía.",
     "",
@@ -130,12 +162,13 @@ function systemPrompt(state, phone, acts) {
     "- Para reservar necesitas: servicio, fecha, hora y nombre completo. Pide lo que falte, una cosa a la vez.",
     "- Antes de reservar pide el nombre completo del cliente, a menos que ya lo haya dicho en este chat. Nunca inventes ni asumas el nombre.",
     "- NO pidas teléfono: el negocio ya tiene el número de WhatsApp del cliente.",
-    "- En cuanto tengas servicio, fecha, hora y nombre, reserva de inmediato con agendar_cita. No hagas una pregunta extra de confirmación como '¿La reservo...?'.",
-    "- Cuando tengas todo, usa la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. Confirma la cita solo si la herramienta responde ok.",
+    "- En cuanto tengas servicio, fecha, hora y nombre, usa de inmediato la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. No hagas tú una pregunta de confirmación como '¿La reservo...?': el sistema le envía al cliente un mensaje con los datos y dos botones (Confirmar cita / Cancelar).",
+    "- La cita queda reservada SOLO cuando el cliente toca Confirmar cita. Mientras haya una solicitud esperando, no digas que la cita está confirmada. Si el cliente pregunta, dile que toque el botón Confirmar cita del mensaje anterior.",
+    "- Si el cliente quiere cambiar algo de una solicitud que espera confirmación (otra hora, otro servicio, otro nombre), usa agendar_cita de nuevo con los datos nuevos; el sistema envía botones nuevos.",
     "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
     "- Tus mensajes anteriores sobre reservas y cancelaciones fueron correctos cuando los enviaste. NUNCA los corrijas, los contradigas ni te disculpes por ellos. Si una cita ya no aparece en la lista de AHORA, es porque se canceló, como dice la lista de acciones. Si una hora ya no aparece como disponible, es porque se reservó.",
     "- Si el cliente responde 'no', 'gracias' o algo parecido después de una reserva o cancelación, despídete con amabilidad en una frase. No agregues correcciones ni información nueva.",
-    "- Después de reservar, confirma siempre en un mensaje completo, por ejemplo: 'Listo, tu cita quedó confirmada: limpieza dental, domingo 15 de noviembre a la 1:00 p. m., a nombre de Ana Pérez.' Incluye servicio, día, hora y nombre. Nunca respondas solo 'Listo'. No ofrezcas otras horas ni te disculpes.",
+    "- El mensaje de confirmación final ('Listo, tu cita quedó confirmada: ...') lo envía el sistema cuando el cliente toca el botón. Tú no lo escribas.",
     "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
     "- Si piden una hora que no está en la lista, es porque ya está reservada o el negocio no atiende a esa hora: di con amabilidad que esa hora ya no está disponible y ofrece las que sí están libres. Solo si no queda ninguna hora libre, di que el equipo le escribirá cuando abra.",
@@ -152,7 +185,7 @@ function systemPrompt(state, phone, acts) {
 
 const TOOLS = [{
   name: "agendar_cita",
-  description: "Reserva una cita en una hora disponible. Devuelve ok si quedó reservada.",
+  description: "Prepara una cita en una hora disponible. El sistema envía al cliente los datos con botones Confirmar cita / Cancelar; queda reservada cuando el cliente toca Confirmar.",
   input_schema: {
     type: "object",
     properties: {
@@ -198,11 +231,10 @@ function freeList(state) {
 function book(input, phone) { return withStateLock(() => bookNow(input, phone)); }
 function cancel(input, phone) { return withStateLock(() => cancelNow(input, phone)); }
 
-async function bookNow(input, phone) {
-  // Read the latest state right before booking so two chats cannot take the same hour.
+// Finds the hour the customer means. Returns { slot }, { own } (already theirs) or { error }.
+function resolve(state, input, phone) {
   const nombre = String(input.nombre || "").trim();
-  if (nombre.length < 2) return { ok: false, error: "Falta el nombre completo. Pídelo al cliente antes de reservar." };
-  const state = await store.getState();
+  if (nombre.length < 2) return { error: "Falta el nombre completo. Pídelo al cliente antes de reservar." };
   const fecha = String(input.fecha || "").trim();
   let hora = String(input.hora || "").trim();
   if (/^\d:\d{2}$/.test(hora)) hora = "0" + hora;
@@ -217,22 +249,89 @@ async function bookNow(input, phone) {
     const same = state.slots.filter((s) => s.time === hora && !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
     if (same.length === 1) slot = same[0];
   }
-  if (!slot) return { ok: false, error: "Esa hora no está disponible. Dilo con amabilidad y ofrece las horas libres AHORA: " + freeList(state) + "." };
+  if (!slot) return { error: "Esa hora no está disponible. Dilo con amabilidad y ofrece las horas libres AHORA: " + freeList(state) + "." };
   if (slot.taken) {
     // The same customer asking again for the hour they already have: it is theirs.
     const own = state.bookings.find((b) => b.phone === phone && b.date === slot.date && b.time === slot.time);
-    if (own) return { ok: true, booking: own, already: true };
-    return { ok: false, error: "Otro cliente acaba de reservar esa hora. Discúlpate en una frase ('Perdona, esa hora la acaban de reservar') y ofrece las horas libres AHORA: " + freeList(state) + ". Si no hay ninguna, di que el equipo le escribirá cuando abra." };
+    if (own) return { own: own };
+    return { taken: true, error: "Otro cliente acaba de reservar esa hora. Discúlpate en una frase ('Perdona, esa hora la acaban de reservar') y ofrece las horas libres AHORA: " + freeList(state) + ". Si no hay ninguna, di que el equipo le escribirá cuando abra." };
   }
-  slot.taken = true;
+  return { slot: slot, nombre: nombre };
+}
+
+// Step 1: the AI has all the details. Nothing is booked yet; the customer gets buttons to confirm.
+async function propose(input, phone) {
+  const state = await store.getState();
+  const r = resolve(state, input, phone);
+  if (r.own) return { ok: true, booking: r.own, already: true };
+  if (r.error) return { ok: false, error: r.error };
+  const pending = {
+    nonce: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    nombre: r.nombre, servicio: String(input.servicio || "Cita"), fecha: r.slot.date, hora: r.slot.time
+  };
+  await store.redis(["SET", "pending:" + phone, JSON.stringify(pending), "EX", "7200"]);
+  return { ok: true, pending: pending };
+}
+
+// Step 2: the customer tapped Confirmar. The first one to confirm an hour gets it.
+async function bookNow(input, phone) {
+  const state = await store.getState();
+  const r = resolve(state, input, phone);
+  if (r.own) return { ok: true, booking: r.own, already: true };
+  if (r.error) return { ok: false, error: r.error, taken: !!r.taken, state: state };
+  r.slot.taken = true;
   const booking = {
-    name: nombre,
+    name: r.nombre,
     service: String(input.servicio || "Cita"),
-    date: slot.date, time: slot.time, phone: phone, at: new Date().toISOString()
+    date: r.slot.date, time: r.slot.time, phone: phone, at: new Date().toISOString()
   };
   state.bookings.push(booking);
   await store.saveState(state);
   return { ok: true, booking: booking };
+}
+
+function proposalText(p) {
+  return "Revisa los datos de tu cita:\n\n" +
+    "Servicio: " + p.servicio + "\n" +
+    "Día: " + store.dayLabel(p.fecha) + "\n" +
+    "Hora: " + store.fmt12(p.hora) + "\n" +
+    "Nombre: " + p.nombre + "\n\n" +
+    "Toca Confirmar cita para reservarla.";
+}
+
+// Free hours written for the customer.
+function freeForCustomer(state) {
+  const t = store.now();
+  const byDate = {};
+  state.slots.filter((s) => !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)))
+    .forEach((s) => { (byDate[s.date] = byDate[s.date] || []).push(s.time); });
+  return Object.keys(byDate).sort().map((d) => store.dayLabel(d) + ": " + byDate[d].sort().map(store.fmt12).join(", ")).join("\n");
+}
+
+// The customer tapped a button (or wrote "sí" / "no") about the request that was waiting.
+async function decide(yes, nonce, pending, phone, acts) {
+  const out = { text: "", made: [], cancelled: [] };
+  if (!pending || (nonce && nonce !== pending.nonce)) {
+    out.text = yes
+      ? "Esa solicitud ya no está activa. Dime qué día y hora quieres y te la preparo de nuevo."
+      : "Listo, no se reservó nada. ¿Te ayudo con algo más?";
+    return out;
+  }
+  await store.redis(["DEL", "pending:" + phone]);
+  if (!yes) {
+    out.text = "Listo, no se reservó nada. Si quieres otra hora, dime cuál.";
+    return out;
+  }
+  const res = await book(pending, phone);
+  if (res.ok) {
+    if (!res.already) { out.made.push(res.booking); acts.push(describe("Reservada", res.booking)); }
+    out.text = summary([res.booking], []);
+    return out;
+  }
+  const free = res.state ? freeForCustomer(res.state) : "";
+  out.text = "Perdona, esa hora la acaban de reservar." +
+    (free ? " Estas horas siguen libres:\n" + free + "\n\n¿Cuál prefieres?" : " Por ahora no quedan horas libres; el equipo te escribirá cuando abra.");
+  return out;
 }
 
 // Reply used when the AI returns no text: a full confirmation built from what actually happened.
@@ -261,32 +360,32 @@ async function cancelNow(input, phone) {
 }
 
 // One try at answering. Throws if the AI fails or returns nothing usable.
-async function attempt(state, history, text, phone, acts, made, cancelled, tokens) {
+async function attempt(state, history, text, phone, acts, made, cancelled, tokens, pending) {
   const messages = history.concat([{ role: "user", content: text }]);
   // The system prompt stays the same for the whole try. The model's reasoning blocks are tied
   // to it, so changing it between tool calls makes the API reject the conversation.
-  const system = systemPrompt(state, phone, acts);
+  const system = systemPrompt(state, phone, acts, pending);
   for (let i = 0; i < 5; i++) {
     const resp = await callClaude({ model: MODEL, max_tokens: tokens, system: system, tools: TOOLS, messages: messages });
     if (!resp || !Array.isArray(resp.content)) throw new Error("Claude returned an unexpected body");
     if (resp.stop_reason === "tool_use") {
       messages.push({ role: "assistant", content: resp.content });
       const results = [];
+      let proposal = null;
       for (const block of resp.content) {
         if (block.type !== "tool_use") continue;
         const isCancel = block.name === "cancelar_cita";
-        const res = isCancel ? await cancel(block.input || {}, phone) : await book(block.input || {}, phone);
+        const res = isCancel ? await cancel(block.input || {}, phone) : await propose(block.input || {}, phone);
         let payload;
-        if (res.ok) {
+        if (res.ok && res.pending) {
+          proposal = res.pending;
+          payload = { ok: true, resultado: "Se enviaron al cliente los datos con botones para confirmar. Aún no está reservada." };
+        } else if (res.ok) {
           const b = res.booking;
-          if (!res.already) {
-            (isCancel ? cancelled : made).push(b);
-            acts.push(describe(isCancel ? "Cancelada" : "Reservada", b));
-          }
+          if (isCancel) { cancelled.push(b); acts.push(describe("Cancelada", b)); }
           payload = {
             ok: true,
-            resultado: isCancel ? "Cita cancelada. Esa hora quedó libre."
-              : res.already ? "Esta cita ya estaba reservada y confirmada para este cliente." : "Cita reservada y confirmada.",
+            resultado: isCancel ? "Cita cancelada. Esa hora quedó libre." : "Esta cita ya estaba reservada y confirmada para este cliente.",
             servicio: b.service, dia: store.dayLabel(b.date), hora: store.fmt12(b.time), nombre: b.name
           };
         } else {
@@ -294,6 +393,8 @@ async function attempt(state, history, text, phone, acts, made, cancelled, token
         }
         results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(payload), is_error: !res.ok });
       }
+      // The buttons message is the whole reply: no need to ask the AI for more text.
+      if (proposal) return { proposal: proposal };
       messages.push({ role: "user", content: results });
       continue;
     }
@@ -307,13 +408,17 @@ async function attempt(state, history, text, phone, acts, made, cancelled, token
 // The customer always gets a sensible reply:
 // 1) the AI's answer; 2) if it fails after booking or cancelling, a confirmation built by the server;
 // 3) if it fails before, one fresh try; 4) if that fails too, a polite hand-off to the team.
-async function answer(state, history, text, phone, acts) {
+async function answer(state, history, text, phone, acts, pending) {
   const made = [];
   const cancelled = [];
   for (let n = 0; n < 2; n++) {
     try {
       const st = n === 0 ? state : await store.getState();
-      const out = await attempt(st, history, text, phone, acts, made, cancelled, n === 0 ? 2000 : 4000);
+      const out = await attempt(st, history, text, phone, acts, made, cancelled, n === 0 ? 2000 : 4000, pending);
+      if (out && out.proposal) {
+        const pre = summary([], cancelled);
+        return { text: (pre ? pre + "\n\n" : "") + proposalText(out.proposal), buttons: out.proposal, made: made, cancelled: cancelled };
+      }
       return { text: out, made: made, cancelled: cancelled };
     } catch (err) {
       console.error("Answer try " + (n + 1) + " failed:", err);
@@ -366,11 +471,12 @@ async function handle(msg) {
   if (first === null) { console.log("Skipped: message already handled"); return; }
   console.log("Incoming " + msg.type + " message from ..." + String(from).slice(-4));
 
-  if (msg.type !== "text" || !msg.text || !msg.text.body) {
+  const tap = msg.type === "interactive" && msg.interactive && msg.interactive.button_reply;
+  if (!tap && (msg.type !== "text" || !msg.text || !msg.text.body)) {
     await sendWhatsApp(from, "Por ahora solo puedo leer mensajes de texto. ¿Me escribes tu consulta?");
     return;
   }
-  const text = msg.text.body.slice(0, 2000);
+  const text = tap ? String(tap.title || "").slice(0, 100) : msg.text.body.slice(0, 2000);
 
   if (owners().indexOf(digits(from)) !== -1 && (await ownerCommand(text, from))) return;
 
@@ -378,6 +484,7 @@ async function handle(msg) {
   if (/borrar mis datos|delete my data/i.test(text)) {
     await store.redis(["DEL", "chat:" + digits(from)]);
     await store.redis(["DEL", "acts:" + digits(from)]);
+    await store.redis(["DEL", "pending:" + digits(from)]);
     const st = await store.getState();
     const mine = st.bookings.filter((b) => b.phone === digits(from));
     mine.forEach((b) => {
@@ -392,7 +499,7 @@ async function handle(msg) {
 
   const state = await store.getState();
   // ALWAYS_ANSWER=1 (set in Vercel) makes the AI answer at any hour, for testing.
-  if (state.config.mode === "closed" && process.env.ALWAYS_ANSWER !== "1") {
+  if (!tap && state.config.mode === "closed" && process.env.ALWAYS_ANSWER !== "1") {
     const t = store.now().time;
     if (t >= state.config.open && t < state.config.close) {
       console.log("Skipped: business is open (" + t + "), mode is closed-only");
@@ -418,11 +525,28 @@ async function handle(msg) {
     const acts = rawActs ? JSON.parse(rawActs) : [];
     const before = acts.length;
 
-    res = await answer(state, history, text, digits(from), acts);
-    await sendWhatsApp(from, res.text);
+    const rawPending = await store.redis(["GET", "pending:" + digits(from)]);
+    const pending = rawPending ? JSON.parse(rawPending) : null;
+    // A tap on a button, or a plain "sí" / "no" while a request is waiting, decides it.
+    let choice = null;
+    const tapId = tap ? String(tap.id || "") : "";
+    if (/^(ok|no):/.test(tapId)) choice = { yes: tapId.slice(0, 2) === "ok", nonce: tapId.slice(3) };
+    else if (pending && /^\s*(s[ií]|confirm\w*|ok(ay)?|dale|listo|de acuerdo)[\s.!]*$/i.test(text)) choice = { yes: true, nonce: pending.nonce };
+    else if (pending && /^\s*(no|cancel\w*)[\s.!]*$/i.test(text)) choice = { yes: false, nonce: pending.nonce };
+
+    let said = text;
+    if (choice) {
+      res = await decide(choice.yes, choice.nonce, pending, digits(from), acts);
+      said = choice.yes ? "[El cliente tocó Confirmar cita]" : "[El cliente tocó Cancelar]";
+    } else {
+      res = await answer(state, history, text, digits(from), acts, pending);
+    }
+    if (res.buttons) await sendButtons(from, res.text, res.buttons.nonce);
+    else await sendWhatsApp(from, res.text);
     if (acts.length !== before) await store.redis(["SET", actsKey, JSON.stringify(acts.slice(-8)), "EX", "86400"]);
 
-    history.push({ role: "user", content: text }, { role: "assistant", content: res.text });
+    history.push({ role: "user", content: said },
+      { role: "assistant", content: res.text + (res.buttons ? "\n[Se enviaron los botones Confirmar cita / Cancelar]" : "") });
     await store.redis(["SET", key, JSON.stringify(history.slice(-12)), "EX", "86400"]);
   } finally {
     await store.redis(["DEL", lock]);
