@@ -40,19 +40,32 @@ async function sendOnce(to, body) {
 
 // Alert the business. Email is used when a business email and RESEND_API_KEY are set;
 // otherwise the alert goes by WhatsApp to OWNER_NUMBERS.
-async function notifyBusiness(state, subject, text, skip) {
-  const to = (state.config.email || process.env.OWNER_EMAIL || "").trim();
-  if (to && process.env.RESEND_API_KEY) {
+// The email key. The new key was saved in Vercel under the name "AI", so that one is tried first.
+function emailKeys() {
+  return [process.env.AI, process.env.RESEND_API_KEY]
+    .map((k) => String(k || "").trim()).filter((k) => k.startsWith("re_"));
+}
+
+async function sendEmail(to, subject, text) {
+  for (const key of emailKeys()) {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: { Authorization: "Bearer " + process.env.RESEND_API_KEY, "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
       body: JSON.stringify({
         from: process.env.EMAIL_FROM || "Recepcionista <onboarding@resend.dev>",
         to: [to], subject: subject, text: text
       })
     });
-    if (r.ok) { console.log("Email alert sent"); return; }
+    if (r.ok) { console.log("Email alert sent"); return true; }
     console.error("Email alert failed", r.status, await r.text());
+  }
+  return false;
+}
+
+async function notifyBusiness(state, subject, text, skip) {
+  const to = (state.config.email || process.env.OWNER_EMAIL || "").trim();
+  if (to && emailKeys().length) {
+    if (await sendEmail(to, subject, text)) return;
     // The alert must not get lost: send it by WhatsApp to the owner (not to the customer's own chat).
     for (const o of owners()) if (o !== skip) await sendWhatsApp(o, subject + "\n" + text);
     return;
