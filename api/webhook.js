@@ -173,6 +173,7 @@ function systemPrompt(state, phone, acts, pending) {
     "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
     "- Tus mensajes anteriores sobre reservas y cancelaciones fueron correctos cuando los enviaste. NUNCA los corrijas, los contradigas ni te disculpes por ellos. Si una cita ya no aparece en la lista de AHORA, es porque se canceló, como dice la lista de acciones. Si una hora ya no aparece como disponible, es porque se reservó.",
     "- Si el cliente responde 'no', 'gracias' o algo parecido después de una reserva o cancelación, despídete con amabilidad en una frase. No agregues correcciones ni información nueva.",
+    "- Al decir el día usa el día y la fecha que aparecen en la lista (por ejemplo 'domingo 15 de noviembre'). Di 'hoy' o 'mañana' solo si la lista de horas lo marca así.",
     "- El mensaje de confirmación final ('Listo, tu cita quedó confirmada: ...') lo envía el sistema cuando el cliente toca el botón. Tú no lo escribas.",
     "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
@@ -313,10 +314,32 @@ function freeForCustomer(state) {
   return Object.keys(byDate).sort().map((d) => store.dayLabel(d) + ": " + byDate[d].sort().map(store.fmt12).join(", ")).join("\n");
 }
 
-// The customer tapped a button (or wrote "sí" / "no") about the request that was waiting.
+// The customer tapped a button (or wrote "sí" / "no") about the request that was waiting,
+// or about a booking that was just confirmed.
 async function decide(yes, nonce, pending, phone, acts) {
   const out = { text: "", made: [], cancelled: [] };
-  if (!pending || (nonce && nonce !== pending.nonce)) {
+  const rawLast = await store.redis(["GET", store.key("last:" + phone)]);
+  const last = rawLast ? JSON.parse(rawLast) : null;
+  const pendingIsOther = !pending || (nonce && nonce !== pending.nonce);
+  if (last && nonce && nonce === last.nonce && pendingIsOther) {
+    // A button from the message that already confirmed this booking.
+    const when = store.dayLabel(last.date) + " a las " + store.fmt12(last.time);
+    if (yes) {
+      out.text = "Tu cita ya quedó confirmada: " + last.service + ", " + when + ", a nombre de " + last.name + ".";
+      return out;
+    }
+    await store.redis(["DEL", store.key("last:" + phone)]);
+    const res = await cancel({ fecha: last.date, hora: last.time }, phone);
+    if (res.ok) {
+      out.cancelled.push(res.booking);
+      acts.push(describe("Cancelada", res.booking));
+      out.text = "Listo, tu cita de " + last.service + ", " + when + " quedó cancelada. La hora queda libre.";
+    } else {
+      out.text = "Esa cita ya no estaba reservada.";
+    }
+    return out;
+  }
+  if (pendingIsOther) {
     out.text = yes
       ? "Esa solicitud ya no está activa. Dime qué día y hora quieres y te la preparo de nuevo."
       : "Listo, no se reservó nada. ¿Te ayudo con algo más?";
@@ -329,7 +352,15 @@ async function decide(yes, nonce, pending, phone, acts) {
   }
   const res = await book(pending, phone);
   if (res.ok) {
-    if (!res.already) { out.made.push(res.booking); acts.push(describe("Reservada", res.booking)); }
+    if (!res.already) {
+      out.made.push(res.booking);
+      acts.push(describe("Reservada", res.booking));
+      // Remember this confirmation, so a later button on the same message can still cancel it.
+      await store.redis(["SET", store.key("last:" + phone), JSON.stringify({
+        nonce: pending.nonce, date: res.booking.date, time: res.booking.time,
+        service: res.booking.service, name: res.booking.name
+      }), "EX", "7200"]);
+    }
     out.text = summary([res.booking], []);
     return out;
   }
