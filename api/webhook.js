@@ -4,6 +4,7 @@
 const crypto = require("crypto");
 const store = require("../lib/store");
 const mail = require("../lib/mail");
+const understand = require("../lib/understand");
 
 const GRAPH = process.env.GRAPH_VERSION || "v25.0";
 const MODEL = process.env.CLAUDE_MODEL || "claude-haiku-5-5";
@@ -180,6 +181,11 @@ function systemPrompt(state, phone, acts, pending) {
     "- Si piden una hora que no está en la lista, es porque ya está reservada o el negocio no atiende a esa hora: di con amabilidad que esa hora ya no está disponible y ofrece las que sí están libres. Solo si no queda ninguna hora libre, di que el equipo le escribirá cuando abra.",
     "- Si agendar_cita responde que otro cliente acaba de reservar esa hora, discúlpate ('Perdona, esa hora la acaban de reservar') y ofrece las horas libres que te da la herramienta.",
     "- Si no sabes algo, di que el equipo responderá cuando abra. No inventes precios, horas ni datos.",
+    "- Entiende siempre aunque haya errores de escritura: letras de más o de menos, palabras pegadas, sin tildes, abreviaturas y jerga (por ejemplo 'porfa', 'xfa', 'q', 'k', 'ahorita', 'maana', 'mañn', 'mñna'). Si una palabra se parece a otra que tiene sentido en el contexto, usa esa. Nunca digas que no entiendes por una falta de ortografía.",
+    "- Horas dichas de muchas formas: 'a las tres', 'las 3', '3 pm', '3pm', 'tres de la tarde', 'las 9am', 'una', 'mediodía', 'medio día'. Conviértelas a la hora de la lista que corresponda (por ejemplo 'a las tres' = 15:00 si esa hora está en la lista). Si hay dos posibilidades, pregunta una sola vez con las opciones exactas.",
+    "- Días dichos de muchas formas: 'hoy', 'mañana', 'pasado mañana', 'el lunes', 'lun', 'este domingo', 'el 16'. Usa el día de la lista que corresponda. Si ninguno coincide, di qué días tienen horas libres.",
+    "- Si el cliente escribe algo muy corto o confuso ('ok', 'ya', 'si', 'esa', 'la de las 3'), interpreta según lo último que se habló en el chat.",
+    "- Si de verdad no queda claro, haz una sola pregunta corta con opciones concretas. Nunca respondas solo 'no te entendí'.",
     "- Usa sentido común, como una buena recepcionista humana. Entiende mensajes con errores de escritura, abreviaturas y respuestas cortas ('si', 'ok', 'dale', 'esa', 'la primera', 'a la 1') según lo último que se habló en el chat.",
     "- Si el cliente da varios datos en un solo mensaje, úsalos todos; no vuelvas a preguntar algo que ya dijo.",
     "- Si de verdad no queda claro qué quiere, haz UNA pregunta corta y concreta con opciones (por ejemplo: '¿Prefieres a las 9:00 a. m. o a la 1:00 p. m.?'). Nunca respondas 'no te entendí'.",
@@ -517,7 +523,7 @@ async function handle(msg) {
   if (owners().indexOf(digits(from)) !== -1 && (await ownerCommand(text, from))) return;
 
   // Privacy: anyone can ask to have their chat and bookings removed.
-  if (/borrar mis datos|delete my data/i.test(text)) {
+  if (understand.wantsDelete(text)) {
     await store.redis(["DEL", store.key("chat:" + digits(from))]);
     await store.redis(["DEL", store.key("acts:" + digits(from))]);
     await store.redis(["DEL", store.key("pending:" + digits(from))]);
@@ -564,11 +570,16 @@ async function handle(msg) {
     const rawPending = await store.redis(["GET", store.key("pending:" + digits(from))]);
     const pending = rawPending ? JSON.parse(rawPending) : null;
     // A tap on a button, or a plain "sí" / "no" while a request is waiting, decides it.
+    const rawLast = await store.redis(["GET", store.key("last:" + digits(from))]);
+    const lastB = rawLast ? JSON.parse(rawLast) : null;
     let choice = null;
     const tapId = tap ? String(tap.id || "") : "";
+    // Short answers, with typos allowed ("sii", "cancelr", "dale porfa").
+    const intent = tap ? null : understand.choice(text);
     if (/^(ok|no):/.test(tapId)) choice = { yes: tapId.slice(0, 2) === "ok", nonce: tapId.slice(3) };
-    else if (pending && /^\s*(s[ií]|confirm\w*|ok(ay)?|dale|listo|de acuerdo)[\s.!]*$/i.test(text)) choice = { yes: true, nonce: pending.nonce };
-    else if (pending && /^\s*(no|cancel\w*)[\s.!]*$/i.test(text)) choice = { yes: false, nonce: pending.nonce };
+    else if (pending && intent) choice = { yes: intent === "yes", nonce: pending.nonce };
+    // After a confirmed booking, a clear cancel request cancels it. A plain "no" or "gracias" does not.
+    else if (!pending && intent === "cancel" && lastB) choice = { yes: false, nonce: lastB.nonce };
 
     let said = text;
     if (choice) {
