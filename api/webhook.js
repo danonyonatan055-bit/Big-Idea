@@ -45,9 +45,10 @@ async function sendButtons(to, body, nonce) {
   };
   for (let i = 0; i < 2; i++) {
     try {
-      const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + store.current().phoneId + "/messages", {
+      const ep = waEndpoint();
+      const r = await fetch(ep.url, {
         method: "POST",
-        headers: { Authorization: "Bearer " + store.whatsappToken(), "Content-Type": "application/json" },
+        headers: Object.assign({}, ep.auth, { "Content-Type": "application/json" }),
         body: JSON.stringify(payload)
       });
       if (r.ok) { console.log("WhatsApp buttons sent to ..." + String(to).slice(-4)); return true; }
@@ -59,10 +60,21 @@ async function sendButtons(to, body, nonce) {
   return sendWhatsApp(to, body + "\n\nResponde SÍ para confirmar o NO para cancelar.");
 }
 
+// Where a business's messages go. Meta direct by default; 360dialog when the
+// business connected its number through that provider (same payload format).
+function waEndpoint() {
+  const t = store.current();
+  if (t.provider === "360dialog") {
+    return { url: "https://waba-v2.360dialog.io/messages", auth: { "D360-API-KEY": store.whatsappToken() } };
+  }
+  return { url: "https://graph.facebook.com/" + GRAPH + "/" + t.phoneId + "/messages", auth: { Authorization: "Bearer " + store.whatsappToken() } };
+}
+
 async function sendOnce(to, body) {
-  const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + store.current().phoneId + "/messages", {
+  const ep = waEndpoint();
+  const r = await fetch(ep.url, {
     method: "POST",
-    headers: { Authorization: "Bearer " + store.whatsappToken(), "Content-Type": "application/json" },
+    headers: Object.assign({}, ep.auth, { "Content-Type": "application/json" }),
     body: JSON.stringify({ messaging_product: "whatsapp", to: to, type: "text", text: { body: body } })
   });
   if (!r.ok) console.error("WhatsApp send failed", r.status, await r.text());
