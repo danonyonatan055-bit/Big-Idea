@@ -12,7 +12,22 @@ function owners() {
   return String(process.env.OWNER_NUMBERS || "").split(",").map(digits).filter(Boolean);
 }
 
+// What the customer reads when the AI cannot answer. It never mentions an error.
+const HANDOFF = "Gracias por escribirnos. Le paso tu mensaje al equipo y te responden por aquí lo antes posible.";
+
+function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
 async function sendWhatsApp(to, body) {
+  for (let i = 0; i < 2; i++) {
+    try {
+      if (await sendOnce(to, body)) return true;
+    } catch (err) { console.error("WhatsApp send threw", err); }
+    await wait(600);
+  }
+  return false;
+}
+
+async function sendOnce(to, body) {
   const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + process.env.WHATSAPP_PHONE_NUMBER_ID + "/messages", {
     method: "POST",
     headers: { Authorization: "Bearer " + process.env.WHATSAPP_TOKEN, "Content-Type": "application/json" },
@@ -25,7 +40,7 @@ async function sendWhatsApp(to, body) {
 
 // Alert the business. Email is used when a business email and RESEND_API_KEY are set;
 // otherwise the alert goes by WhatsApp to OWNER_NUMBERS.
-async function notifyBusiness(state, subject, text) {
+async function notifyBusiness(state, subject, text, skip) {
   const to = (state.config.email || process.env.OWNER_EMAIL || "").trim();
   if (to && process.env.RESEND_API_KEY) {
     const r = await fetch("https://api.resend.com/emails", {
@@ -38,24 +53,39 @@ async function notifyBusiness(state, subject, text) {
     });
     if (r.ok) { console.log("Email alert sent"); return; }
     console.error("Email alert failed", r.status, await r.text());
+    // The alert must not get lost: send it by WhatsApp to the owner (not to the customer's own chat).
+    for (const o of owners()) if (o !== skip) await sendWhatsApp(o, subject + "\n" + text);
     return;
   }
   for (const o of owners()) await sendWhatsApp(o, subject + "\n" + text);
 }
 
+// Busy or flaky moments (429, 5xx, network) are retried. Other errors are thrown.
 async function callClaude(payload) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error("Claude error " + r.status + ": " + JSON.stringify(j));
-  return j;
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j) return j;
+      last = new Error("Claude error " + r.status + ": " + JSON.stringify(j));
+      if (r.status !== 429 && r.status < 500) throw last;
+    } catch (err) {
+      if (err === last) throw err;
+      last = err;
+    }
+    console.error("Claude call failed, retrying", String(last).slice(0, 200));
+    await wait(700 * (i + 1));
+  }
+  throw last;
 }
 
 function describe(kind, b) {
@@ -118,6 +148,11 @@ function systemPrompt(state, phone, acts) {
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
     "- Si piden una hora que no está en la lista, o no hay horas, di que el equipo le escribirá cuando abra.",
     "- Si no sabes algo, di que el equipo responderá cuando abra. No inventes precios, horas ni datos.",
+    "- Usa sentido común, como una buena recepcionista humana. Entiende mensajes con errores de escritura, abreviaturas y respuestas cortas ('si', 'ok', 'dale', 'esa', 'la primera', 'a la 1') según lo último que se habló en el chat.",
+    "- Si el cliente da varios datos en un solo mensaje, úsalos todos; no vuelvas a preguntar algo que ya dijo.",
+    "- Si de verdad no queda claro qué quiere, haz UNA pregunta corta y concreta con opciones (por ejemplo: '¿Prefieres a las 9:00 a. m. o a la 1:00 p. m.?'). Nunca respondas 'no te entendí'.",
+    "- Nunca hables de errores, sistemas, herramientas, fallas técnicas ni de que eres un programa con problemas. El cliente solo ve una atención normal.",
+    "- Siempre responde algo útil; nunca dejes un mensaje vacío.",
     "- No des diagnósticos ni consejos médicos. En una urgencia, indica que llame al negocio."
   ].join("\n");
 }
@@ -156,14 +191,29 @@ async function book(input, phone) {
   const fecha = String(input.fecha || "").trim();
   let hora = String(input.hora || "").trim();
   if (/^\d:\d{2}$/.test(hora)) hora = "0" + hora;
-  const slot = state.slots.find((s) => s.date === fecha && s.time === hora);
+  let slot = state.slots.find((s) => s.date === fecha && s.time === hora);
+  // Common sense: "01:00" meant as 1 p. m., or the right hour with the wrong date.
+  if (!slot && /^\d{2}:\d{2}$/.test(hora) && Number(hora.slice(0, 2)) < 12) {
+    const pm = String(Number(hora.slice(0, 2)) + 12) + hora.slice(2);
+    slot = state.slots.find((s) => s.date === fecha && s.time === pm);
+  }
+  if (!slot) {
+    const t = store.now();
+    const same = state.slots.filter((s) => s.time === hora && !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
+    if (same.length === 1) slot = same[0];
+  }
   if (!slot) return { ok: false, error: "Esa hora no está en la lista. Ofrece una de las disponibles." };
-  if (slot.taken) return { ok: false, error: "Esa hora ya está reservada. Ofrece otra." };
+  if (slot.taken) {
+    // The same customer asking again for the hour they already have: it is theirs.
+    const own = state.bookings.find((b) => b.phone === phone && b.date === slot.date && b.time === slot.time);
+    if (own) return { ok: true, booking: own, already: true };
+    return { ok: false, error: "Esa hora ya está reservada. Ofrece otra." };
+  }
   slot.taken = true;
   const booking = {
     name: nombre,
     service: String(input.servicio || "Cita"),
-    date: fecha, time: hora, phone: phone, at: new Date().toISOString()
+    date: slot.date, time: slot.time, phone: phone, at: new Date().toISOString()
   };
   state.bookings.push(booking);
   await store.saveState(state);
@@ -176,7 +226,7 @@ function summary(made, cancelled) {
   cancelled.forEach((b) => lines.push("Tu cita de " + b.service + " del " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) + " quedó cancelada."));
   made.forEach((b) => lines.push("Listo, tu cita quedó confirmada: " + b.service + ", " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) +
     ", a nombre de " + b.name + "."));
-  return lines.length ? lines.join("\n") : "Perdona, no te entendí bien. ¿Me lo repites, por favor?";
+  return lines.join("\n");
 }
 
 async function cancel(input, phone) {
@@ -195,25 +245,15 @@ async function cancel(input, phone) {
   return { ok: true, booking: booking };
 }
 
-async function answer(state, history, text, phone, acts) {
+// One try at answering. Throws if the AI fails or returns nothing usable.
+async function attempt(state, history, text, phone, acts, made, cancelled, tokens) {
   const messages = history.concat([{ role: "user", content: text }]);
-  const made = [];
-  const cancelled = [];
-  // The system prompt stays the same for the whole request. The model's reasoning blocks are tied
+  // The system prompt stays the same for the whole try. The model's reasoning blocks are tied
   // to it, so changing it between tool calls makes the API reject the conversation.
   const system = systemPrompt(state, phone, acts);
-  for (let i = 0; i < 4; i++) {
-    let resp;
-    try {
-      resp = await callClaude({ model: MODEL, max_tokens: 2000, system: system, tools: TOOLS, messages: messages });
-    } catch (err) {
-      // If a booking or cancellation already happened, the customer must still be told.
-      if (made.length || cancelled.length) {
-        console.error("Claude failed after an action; sending a built confirmation.", err);
-        return { text: summary(made, cancelled), made: made, cancelled: cancelled };
-      }
-      throw err;
-    }
+  for (let i = 0; i < 5; i++) {
+    const resp = await callClaude({ model: MODEL, max_tokens: tokens, system: system, tools: TOOLS, messages: messages });
+    if (!resp || !Array.isArray(resp.content)) throw new Error("Claude returned an unexpected body");
     if (resp.stop_reason === "tool_use") {
       messages.push({ role: "assistant", content: resp.content });
       const results = [];
@@ -223,12 +263,15 @@ async function answer(state, history, text, phone, acts) {
         const res = isCancel ? await cancel(block.input || {}, phone) : await book(block.input || {}, phone);
         let payload;
         if (res.ok) {
-          (isCancel ? cancelled : made).push(res.booking);
-          acts.push(describe(isCancel ? "Cancelada" : "Reservada", res.booking));
           const b = res.booking;
+          if (!res.already) {
+            (isCancel ? cancelled : made).push(b);
+            acts.push(describe(isCancel ? "Cancelada" : "Reservada", b));
+          }
           payload = {
             ok: true,
-            resultado: isCancel ? "Cita cancelada. Esa hora quedó libre." : "Cita reservada y confirmada.",
+            resultado: isCancel ? "Cita cancelada. Esa hora quedó libre."
+              : res.already ? "Esta cita ya estaba reservada y confirmada para este cliente." : "Cita reservada y confirmada.",
             servicio: b.service, dia: store.dayLabel(b.date), hora: store.fmt12(b.time), nombre: b.name
           };
         } else {
@@ -239,11 +282,30 @@ async function answer(state, history, text, phone, acts) {
       messages.push({ role: "user", content: results });
       continue;
     }
-    const out = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-    if (!out) console.error("Claude returned no text. stop_reason=" + resp.stop_reason);
-    return { text: out || summary(made, cancelled), made: made, cancelled: cancelled };
+    const out = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    if (!out) throw new Error("Claude returned no text. stop_reason=" + resp.stop_reason);
+    return out;
   }
-  return { text: summary(made, cancelled), made: made, cancelled: cancelled };
+  throw new Error("Too many tool rounds");
+}
+
+// The customer always gets a sensible reply:
+// 1) the AI's answer; 2) if it fails after booking or cancelling, a confirmation built by the server;
+// 3) if it fails before, one fresh try; 4) if that fails too, a polite hand-off to the team.
+async function answer(state, history, text, phone, acts) {
+  const made = [];
+  const cancelled = [];
+  for (let n = 0; n < 2; n++) {
+    try {
+      const st = n === 0 ? state : await store.getState();
+      const out = await attempt(st, history, text, phone, acts, made, cancelled, n === 0 ? 2000 : 4000);
+      return { text: out, made: made, cancelled: cancelled };
+    } catch (err) {
+      console.error("Answer try " + (n + 1) + " failed:", err);
+      if (made.length || cancelled.length) return { text: summary(made, cancelled), made: made, cancelled: cancelled };
+    }
+  }
+  return { text: HANDOFF, made: made, cancelled: cancelled, failed: true };
 }
 
 // Owner writes "Mañana: 9, 12 y 1" or "Hoy: 3 y 4" to set the open hours.
@@ -261,7 +323,28 @@ async function ownerCommand(text, from) {
   return true;
 }
 
+// Whatever goes wrong, the customer gets a polite reply and the business is told.
 async function handleMessage(msg) {
+  try {
+    await handle(msg);
+  } catch (err) {
+    console.error("Message handling failed:", err);
+    try {
+      await sendWhatsApp(msg.from, HANDOFF);
+      await unanswered(msg);
+    } catch (e) { console.error("Hand-off failed:", e); }
+  }
+}
+
+async function unanswered(msg) {
+  const state = await store.getState();
+  const said = msg.text && msg.text.body ? msg.text.body.slice(0, 500) : "(" + msg.type + ")";
+  await notifyBusiness(state, "Mensaje sin responder de +" + digits(msg.from),
+    "La recepcionista no pudo responder este mensaje. Por favor respóndelo:\n\n\"" + said + "\"\n\nWhatsApp del cliente: +" + digits(msg.from),
+    digits(msg.from));
+}
+
+async function handle(msg) {
   const from = msg.from;
   // Meta can deliver the same message twice. Answer each one only once.
   const first = await store.redis(["SET", "msg:" + msg.id, "1", "NX", "EX", "3600"]);
@@ -307,7 +390,7 @@ async function handleMessage(msg) {
   for (let i = 0; i < 15; i++) {
     const got = await store.redis(["SET", lock, "1", "NX", "EX", "40"]);
     if (got !== null) break;
-    await new Promise((r) => setTimeout(r, 1000));
+    await wait(1000);
   }
 
   const key = "chat:" + digits(from);
@@ -320,13 +403,7 @@ async function handleMessage(msg) {
     const acts = rawActs ? JSON.parse(rawActs) : [];
     const before = acts.length;
 
-    try {
-      res = await answer(state, history, text, digits(from), acts);
-    } catch (err) {
-      console.error("Could not answer:", err);
-      await sendWhatsApp(from, "Tuvimos un problema técnico. Por favor escríbenos de nuevo en un momento.");
-      return;
-    }
+    res = await answer(state, history, text, digits(from), acts);
     await sendWhatsApp(from, res.text);
     if (acts.length !== before) await store.redis(["SET", actsKey, JSON.stringify(acts.slice(-8)), "EX", "86400"]);
 
@@ -336,6 +413,8 @@ async function handleMessage(msg) {
     await store.redis(["DEL", lock]);
   }
 
+  if (res.failed) await unanswered(msg);
+
   // Tell the business about each cancellation and each new booking.
   if (res.cancelled.length || res.made.length) {
     const fresh = await store.getState();
@@ -343,13 +422,13 @@ async function handleMessage(msg) {
       await notifyBusiness(fresh,
         "Cita cancelada: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
         "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
-        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora quedó libre otra vez.");
+        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora quedó libre otra vez.", digits(from));
     }
     for (const b of res.made) {
       await notifyBusiness(fresh,
         "Nueva cita: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
         "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
-        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora ya no se ofrece a otros clientes.");
+        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora ya no se ofrece a otros clientes.", digits(from));
     }
   }
 }
