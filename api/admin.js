@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const store = require("../lib/store");
+const mail = require("../lib/mail");
 
 function allowed(req) {
   const expected = process.env.ADMIN_PASSWORD || "";
@@ -50,6 +51,15 @@ module.exports = async (req, res) => {
         store.setSlotsForDate(state, body.slotsDate, store.parseHours(body.slotsText || ""));
       }
       await store.saveState(state);
+      // "Send a test email" button on the company page.
+      if (body.testEmail) {
+        const to = (state.config.email || "").trim();
+        const out = to
+          ? await mail.send(to, "Correo de prueba de tu recepcionista", "Si lees esto, los avisos de citas llegan bien a este correo.")
+          : { ok: false, error: "Primero escribe el correo del negocio y guarda." };
+        res.status(200).json(Object.assign(view(state), { testEmail: out }));
+        return;
+      }
     }
     res.status(200).json(view(state));
   } catch (err) {

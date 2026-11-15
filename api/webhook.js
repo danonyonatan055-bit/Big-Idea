@@ -2,6 +2,7 @@
 // It asks Claude for an answer and sends it back through WhatsApp.
 
 const store = require("../lib/store");
+const mail = require("../lib/mail");
 
 const GRAPH = process.env.GRAPH_VERSION || "v25.0";
 const MODEL = process.env.CLAUDE_MODEL || "claude-haiku-5-5";
@@ -40,32 +41,10 @@ async function sendOnce(to, body) {
 
 // Alert the business. Email is used when a business email and RESEND_API_KEY are set;
 // otherwise the alert goes by WhatsApp to OWNER_NUMBERS.
-// The email key. The new key was saved in Vercel under the name "AI", so that one is tried first.
-function emailKeys() {
-  return [process.env.AI, process.env.RESEND_API_KEY]
-    .map((k) => String(k || "").trim()).filter((k) => k.startsWith("re_"));
-}
-
-async function sendEmail(to, subject, text) {
-  for (const key of emailKeys()) {
-    const r = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: process.env.EMAIL_FROM || "Recepcionista <onboarding@resend.dev>",
-        to: [to], subject: subject, text: text
-      })
-    });
-    if (r.ok) { console.log("Email alert sent"); return true; }
-    console.error("Email alert failed", r.status, await r.text());
-  }
-  return false;
-}
-
 async function notifyBusiness(state, subject, text, skip) {
   const to = (state.config.email || process.env.OWNER_EMAIL || "").trim();
-  if (to && emailKeys().length) {
-    if (await sendEmail(to, subject, text)) return;
+  if (to && mail.keys().length) {
+    if ((await mail.send(to, subject, text)).ok) return;
     // The alert must not get lost: send it by WhatsApp to the owner (not to the customer's own chat).
     for (const o of owners()) if (o !== skip) await sendWhatsApp(o, subject + "\n" + text);
     return;

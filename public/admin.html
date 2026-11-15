@@ -28,9 +28,9 @@ button:disabled { opacity:.5; }
 ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
 li { border:1px solid var(--line); border-left:4px solid var(--good); border-radius:8px; padding:8px 12px; }
 li small { color:var(--muted); display:block; }
-#status { min-height:1.4em; font-weight:600; }
-#status.bad { color:var(--bad); }
-#status.ok { color:var(--good); }
+#status, #emailStatus { min-height:1.4em; font-weight:600; }
+#status.bad, #emailStatus.bad { color:var(--bad); }
+#status.ok, #emailStatus.ok { color:var(--good); }
 [hidden] { display:none !important; }
 </style>
 </head>
@@ -76,6 +76,8 @@ li small { color:var(--muted); display:block; }
       <p class="hint">A este correo llega un aviso cada vez que la asistente reserva o cancela una cita.</p>
       <label for="email">Correo del negocio</label>
       <input id="email" type="email" placeholder="citas@minegocio.com">
+      <p><button id="testEmail" type="button">Guardar y enviar correo de prueba</button></p>
+      <div id="emailStatus" role="status"></div>
     </section>
 
     <section class="card">
@@ -184,6 +186,26 @@ li small { color:var(--muted); display:block; }
     api("POST", { slotsDate: $("slotsDate").value, slotsText: $("slotsText").value })
       .then(function (d) { render(d, true); $("slotsText").value = ""; say("Horas guardadas.", "ok"); })
       .catch(function (err) { say(err.message, "bad"); });
+  });
+
+  function formConfig() {
+    return {
+      name: $("name").value, info: $("info").value, services: $("services").value, email: $("email").value,
+      mode: $("mode").value, open: $("open").value, close: $("close").value
+    };
+  }
+
+  $("testEmail").addEventListener("click", function () {
+    var box = $("emailStatus");
+    box.textContent = "Enviando…"; box.className = "";
+    api("POST", { config: formConfig(), testEmail: true })
+      .then(function (d) {
+        render(d, true);
+        var t = d.testEmail || {};
+        box.textContent = t.ok ? "Correo de prueba enviado a " + d.config.email + ". Revisa la bandeja de entrada y spam." : "No se envió: " + t.error;
+        box.className = t.ok ? "ok" : "bad";
+      })
+      .catch(function (err) { box.textContent = err.message; box.className = "bad"; });
   });
 
   $("saveConfig").addEventListener("click", function () {
