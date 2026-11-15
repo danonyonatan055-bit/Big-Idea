@@ -4,7 +4,7 @@ const store = require("../lib/store");
 const admin = require("./admin");
 
 function publicView(t) {
-  return { id: t.id, name: t.name, phoneId: t.phoneId, owners: t.owners || "", active: t.active !== false, ownToken: !!t.token, panel: "/admin?n=" + t.id };
+  return { id: t.id, name: t.name, phoneId: t.phoneId, owners: t.owners || "", active: t.active !== false, ownToken: !!t.token, provider: t.provider || "meta", panel: "/admin?n=" + t.id };
 }
 
 function slug(v) {
@@ -37,6 +37,7 @@ module.exports = async (req, res) => {
         const t = { id: id, name: String(b.name || id).slice(0, 100), phoneId: phoneId, owners: owners, active: true,
           pass: store.hashPassword(b.password), createdAt: new Date().toISOString() };
         if (b.token) t.token = store.encrypt(String(b.token).trim());
+        if (b.provider === "360dialog") t.provider = "360dialog";
         list.push(t);
         await store.saveTenants(list);
         // Start the business page with its name.
@@ -59,6 +60,7 @@ module.exports = async (req, res) => {
           t.pass = store.hashPassword(b.password);
         }
         if (b.token) t.token = store.encrypt(String(b.token).trim());
+        if (b.provider !== undefined) t.provider = b.provider === "360dialog" ? "360dialog" : "meta";
         if (b.active !== undefined) t.active = !!b.active;
         await store.saveTenants(list);
       } else {
