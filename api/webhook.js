@@ -58,7 +58,11 @@ async function callClaude(payload) {
   return j;
 }
 
-function systemPrompt(state, phone) {
+function describe(kind, b) {
+  return kind + ": " + b.service + ", " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) + ", a nombre de " + b.name;
+}
+
+function systemPrompt(state, phone, acts) {
   const t = store.now();
   const c = state.config;
   const free = state.slots.filter((s) => !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
@@ -92,8 +96,11 @@ function systemPrompt(state, phone) {
     "Horas disponibles (solo ofrece estas):",
     slotLines,
     "",
-    "Citas que ESTE cliente ya tiene reservadas:",
+    "Citas que ESTE cliente tiene reservadas AHORA:",
     mine,
+    "",
+    "Acciones que el sistema YA ejecutó para este cliente en este chat (son hechos reales, en orden):",
+    (acts && acts.length) ? acts.map((a) => "- " + a).join("\n") : "- Ninguna todavía.",
     "",
     "Reglas:",
     "- Si el cliente saluda o hace una pregunta simple (horario, dirección, precios, formas de pago, qué servicios hay), responde directo y breve con los datos del negocio. No empujes una cita en cada mensaje; ofrécela solo cuando tenga sentido.",
@@ -102,6 +109,8 @@ function systemPrompt(state, phone) {
     "- Antes de reservar pide SIEMPRE el nombre completo y el teléfono de contacto, aunque el cliente ya haya elegido la hora. Si ya los dio antes en este chat, confírmalos en una frase (por ejemplo: '¿La reservo a nombre de Ana Pérez, teléfono 6000-0000?') y espera su respuesta. Nunca inventes ni asumas el nombre o el teléfono.",
     "- Cuando tengas todo, usa la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. Confirma la cita solo si la herramienta responde ok.",
     "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
+    "- Tus mensajes anteriores sobre reservas y cancelaciones fueron correctos cuando los enviaste. NUNCA los corrijas, los contradigas ni te disculpes por ellos. Si una cita ya no aparece en la lista de AHORA, es porque se canceló, como dice la lista de acciones. Si una hora ya no aparece como disponible, es porque se reservó.",
+    "- Si el cliente responde 'no', 'gracias' o algo parecido después de una reserva o cancelación, despídete con amabilidad en una frase. No agregues correcciones ni información nueva.",
     "- Después de reservar, confirma siempre en un mensaje completo: servicio, día, hora, nombre y teléfono. Nunca respondas solo 'Listo'. No ofrezcas otras horas ni te disculpes.",
     "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
@@ -187,13 +196,13 @@ async function cancel(input, phone) {
   return { ok: true, booking: booking };
 }
 
-async function answer(state, history, text, phone) {
+async function answer(state, history, text, phone, acts) {
   const messages = history.concat([{ role: "user", content: text }]);
   const made = [];
   const cancelled = [];
   for (let i = 0; i < 4; i++) {
     const resp = await callClaude({
-      model: MODEL, max_tokens: 500, system: systemPrompt(state, phone), tools: TOOLS, messages: messages
+      model: MODEL, max_tokens: 500, system: systemPrompt(state, phone, acts), tools: TOOLS, messages: messages
     });
     if (resp.stop_reason === "tool_use") {
       messages.push({ role: "assistant", content: resp.content });
@@ -202,7 +211,10 @@ async function answer(state, history, text, phone) {
         if (block.type !== "tool_use") continue;
         const isCancel = block.name === "cancelar_cita";
         const res = isCancel ? await cancel(block.input || {}, phone) : await book(block.input || {}, phone);
-        if (res.ok) (isCancel ? cancelled : made).push(res.booking);
+        if (res.ok) {
+          (isCancel ? cancelled : made).push(res.booking);
+          acts.push(describe(isCancel ? "Cancelada" : "Reservada", res.booking));
+        }
         results.push({
           type: "tool_result", tool_use_id: block.id,
           content: JSON.stringify(res.ok ? { ok: true } : { ok: false, error: res.error }),
@@ -252,6 +264,7 @@ async function handleMessage(msg) {
   // Privacy: anyone can ask to have their chat and bookings removed.
   if (/borrar mis datos|delete my data/i.test(text)) {
     await store.redis(["DEL", "chat:" + digits(from)]);
+    await store.redis(["DEL", "acts:" + digits(from)]);
     const st = await store.getState();
     const mine = st.bookings.filter((b) => b.phone === digits(from));
     mine.forEach((b) => {
@@ -287,9 +300,14 @@ async function handleMessage(msg) {
   try {
     const raw = await store.redis(["GET", key]);
     const history = raw ? JSON.parse(raw) : [];
+    const actsKey = "acts:" + digits(from);
+    const rawActs = await store.redis(["GET", actsKey]);
+    const acts = rawActs ? JSON.parse(rawActs) : [];
+    const before = acts.length;
 
-    res = await answer(state, history, text, digits(from));
+    res = await answer(state, history, text, digits(from), acts);
     await sendWhatsApp(from, res.text);
+    if (acts.length !== before) await store.redis(["SET", actsKey, JSON.stringify(acts.slice(-8)), "EX", "86400"]);
 
     history.push({ role: "user", content: text }, { role: "assistant", content: res.text });
     await store.redis(["SET", key, JSON.stringify(history.slice(-12)), "EX", "86400"]);
