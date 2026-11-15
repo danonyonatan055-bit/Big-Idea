@@ -84,6 +84,20 @@ async function serve(req, res) {
       if (body.slotsDate && /^\d{4}-\d{2}-\d{2}$/.test(body.slotsDate)) {
         store.setSlotsForDate(state, body.slotsDate, store.parseHours(body.slotsText || ""));
       }
+      // Block hours the staff gave by phone or in person (or unblock them).
+      if (body.blockDate && /^\d{4}-\d{2}-\d{2}$/.test(body.blockDate)) {
+        for (const t of store.parseHours(body.blockText || "")) {
+          let slot = state.slots.find((x) => x.date === body.blockDate && x.time === t);
+          if (body.unblock) {
+            if (!slot) continue;
+            // An hour with a real booking stays taken.
+            if (!state.bookings.some((b) => b.date === slot.date && b.time === slot.time)) slot.taken = false;
+          } else {
+            if (!slot) { slot = { date: body.blockDate, time: t, taken: false }; state.slots.push(slot); }
+            slot.taken = true;
+          }
+        }
+      }
       await store.saveState(state);
       // "Send a test email" button on the company page.
       if (body.testEmail) {

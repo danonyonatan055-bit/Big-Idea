@@ -28,9 +28,9 @@ button:disabled { opacity:.5; }
 ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
 li { border:1px solid var(--line); border-left:4px solid var(--good); border-radius:8px; padding:8px 12px; }
 li small { color:var(--muted); display:block; }
-#status, #emailStatus { min-height:1.4em; font-weight:600; }
-#status.bad, #emailStatus.bad { color:var(--bad); }
-#status.ok, #emailStatus.ok { color:var(--good); }
+#status, #emailStatus, #blockStatus { min-height:1.4em; font-weight:600; }
+#status.bad, #emailStatus.bad, #blockStatus.bad { color:var(--bad); }
+#status.ok, #emailStatus.ok, #blockStatus.ok { color:var(--good); }
 [hidden] { display:none !important; }
 </style>
 </head>
@@ -56,6 +56,20 @@ li small { color:var(--muted); display:block; }
       </div>
       <button id="saveSlots" type="button">Guardar horas</button>
       <div class="chips" id="slots"></div>
+    </section>
+
+    <section class="card">
+      <h2>Bloquear horas</h2>
+      <p class="hint">Si das una hora por teléfono o en persona, bloquéala aquí para que la asistente no la ofrezca.</p>
+      <div class="row">
+        <div><label for="blockDate">Día</label><input id="blockDate" type="date"></div>
+        <div><label for="blockText">Hora</label><input id="blockText" type="text" placeholder="2 pm"></div>
+      </div>
+      <div class="row">
+        <button id="blockBtn" type="button">Bloquear</button>
+        <button id="unblockBtn" type="button">Desbloquear</button>
+      </div>
+      <div id="blockStatus" role="status"></div>
     </section>
 
     <section class="card">
@@ -139,6 +153,7 @@ li small { color:var(--muted); display:block; }
       $("open").value = d.config.open;
       $("close").value = d.config.close;
       $("slotsDate").value = d.tomorrow;
+      $("blockDate").value = d.tomorrow;
     }
     var slots = $("slots");
     slots.textContent = "";
@@ -151,7 +166,7 @@ li small { color:var(--muted); display:block; }
     d.slots.forEach(function (s) {
       var el = document.createElement("span");
       el.className = "chip" + (s.taken ? " taken" : "");
-      el.textContent = s.label + (s.taken ? " reservada" : "");
+      el.textContent = s.label + (s.taken ? " ocupada" : "");
       slots.appendChild(el);
     });
     var list = $("bookings");
@@ -200,6 +215,20 @@ li small { color:var(--muted); display:block; }
       mode: $("mode").value, open: $("open").value, close: $("close").value
     };
   }
+
+  function block(unblock) {
+    var box = $("blockStatus");
+    box.textContent = "Guardando…"; box.className = "";
+    api("POST", { blockDate: $("blockDate").value, blockText: $("blockText").value, unblock: unblock })
+      .then(function (d) {
+        render(d, true); $("blockText").value = "";
+        box.textContent = unblock ? "Hora desbloqueada." : "Hora bloqueada. La asistente ya no la ofrece.";
+        box.className = "ok";
+      })
+      .catch(function (err) { box.textContent = err.message; box.className = "bad"; });
+  }
+  $("blockBtn").addEventListener("click", function () { block(false); });
+  $("unblockBtn").addEventListener("click", function () { block(true); });
 
   $("testEmail").addEventListener("click", function () {
     var box = $("emailStatus");
