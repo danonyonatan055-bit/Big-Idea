@@ -1,6 +1,7 @@
 // WhatsApp webhook: Meta calls this URL every time someone writes to the business number.
 // It asks Claude for an answer and sends it back through WhatsApp.
 
+const crypto = require("crypto");
 const store = require("../lib/store");
 const mail = require("../lib/mail");
 
@@ -10,7 +11,7 @@ const MODEL = process.env.CLAUDE_MODEL || "claude-haiku-5-5";
 function digits(s) { return String(s || "").replace(/\D/g, ""); }
 
 function owners() {
-  return String(process.env.OWNER_NUMBERS || "").split(",").map(digits).filter(Boolean);
+  return String(store.current().owners || "").split(",").map(digits).filter(Boolean);
 }
 
 // What the customer reads when the AI cannot answer. It never mentions an error.
@@ -43,9 +44,9 @@ async function sendButtons(to, body, nonce) {
   };
   for (let i = 0; i < 2; i++) {
     try {
-      const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + process.env.WHATSAPP_PHONE_NUMBER_ID + "/messages", {
+      const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + store.current().phoneId + "/messages", {
         method: "POST",
-        headers: { Authorization: "Bearer " + process.env.WHATSAPP_TOKEN, "Content-Type": "application/json" },
+        headers: { Authorization: "Bearer " + store.whatsappToken(), "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
       if (r.ok) { console.log("WhatsApp buttons sent to ..." + String(to).slice(-4)); return true; }
@@ -58,9 +59,9 @@ async function sendButtons(to, body, nonce) {
 }
 
 async function sendOnce(to, body) {
-  const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + process.env.WHATSAPP_PHONE_NUMBER_ID + "/messages", {
+  const r = await fetch("https://graph.facebook.com/" + GRAPH + "/" + store.current().phoneId + "/messages", {
     method: "POST",
-    headers: { Authorization: "Bearer " + process.env.WHATSAPP_TOKEN, "Content-Type": "application/json" },
+    headers: { Authorization: "Bearer " + store.whatsappToken(), "Content-Type": "application/json" },
     body: JSON.stringify({ messaging_product: "whatsapp", to: to, type: "text", text: { body: body } })
   });
   if (!r.ok) console.error("WhatsApp send failed", r.status, await r.text());
@@ -217,10 +218,10 @@ const TOOLS = [{
 async function withStateLock(fn) {
   let got = null;
   for (let i = 0; i < 40 && got === null; i++) {
-    got = await store.redis(["SET", "lock:state", "1", "NX", "EX", "10"]);
+    got = await store.redis(["SET", store.key("lock:state"), "1", "NX", "EX", "10"]);
     if (got === null) await wait(150);
   }
-  try { return await fn(); } finally { if (got !== null) await store.redis(["DEL", "lock:state"]); }
+  try { return await fn(); } finally { if (got !== null) await store.redis(["DEL", store.key("lock:state")]); }
 }
 
 function freeList(state) {
@@ -273,7 +274,7 @@ async function propose(input, phone) {
     nonce: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     nombre: r.nombre, servicio: String(input.servicio || "Cita"), fecha: r.slot.date, hora: r.slot.time
   };
-  await store.redis(["SET", "pending:" + phone, JSON.stringify(pending), "EX", "7200"]);
+  await store.redis(["SET", store.key("pending:" + phone), JSON.stringify(pending), "EX", "7200"]);
   return { ok: true, pending: pending };
 }
 
@@ -321,7 +322,7 @@ async function decide(yes, nonce, pending, phone, acts) {
       : "Listo, no se reservó nada. ¿Te ayudo con algo más?";
     return out;
   }
-  await store.redis(["DEL", "pending:" + phone]);
+  await store.redis(["DEL", store.key("pending:" + phone)]);
   if (!yes) {
     out.text = "Listo, no se reservó nada. Si quieres otra hora, dime cuál.";
     return out;
@@ -486,9 +487,9 @@ async function handle(msg) {
 
   // Privacy: anyone can ask to have their chat and bookings removed.
   if (/borrar mis datos|delete my data/i.test(text)) {
-    await store.redis(["DEL", "chat:" + digits(from)]);
-    await store.redis(["DEL", "acts:" + digits(from)]);
-    await store.redis(["DEL", "pending:" + digits(from)]);
+    await store.redis(["DEL", store.key("chat:" + digits(from))]);
+    await store.redis(["DEL", store.key("acts:" + digits(from))]);
+    await store.redis(["DEL", store.key("pending:" + digits(from))]);
     const st = await store.getState();
     const mine = st.bookings.filter((b) => b.phone === digits(from));
     mine.forEach((b) => {
@@ -512,24 +513,24 @@ async function handle(msg) {
   }
 
   // Handle one message at a time per customer, so two quick messages do not get mixed up.
-  const lock = "lock:" + digits(from);
+  const lock = store.key("lock:" + digits(from));
   for (let i = 0; i < 15; i++) {
     const got = await store.redis(["SET", lock, "1", "NX", "EX", "40"]);
     if (got !== null) break;
     await wait(1000);
   }
 
-  const key = "chat:" + digits(from);
+  const key = store.key("chat:" + digits(from));
   let res;
   try {
     const raw = await store.redis(["GET", key]);
     const history = raw ? JSON.parse(raw) : [];
-    const actsKey = "acts:" + digits(from);
+    const actsKey = store.key("acts:" + digits(from));
     const rawActs = await store.redis(["GET", actsKey]);
     const acts = rawActs ? JSON.parse(rawActs) : [];
     const before = acts.length;
 
-    const rawPending = await store.redis(["GET", "pending:" + digits(from)]);
+    const rawPending = await store.redis(["GET", store.key("pending:" + digits(from))]);
     const pending = rawPending ? JSON.parse(rawPending) : null;
     // A tap on a button, or a plain "sí" / "no" while a request is waiting, decides it.
     let choice = null;
@@ -576,6 +577,23 @@ async function handle(msg) {
   }
 }
 
+// Meta signs every call with the app secret. With META_APP_SECRET set in Vercel the signature is checked.
+// It only blocks calls when ENFORCE_SIGNATURE=1, so a wrong setup cannot silence the assistant.
+function signatureOk(req) {
+  const secret = process.env.META_APP_SECRET;
+  if (!secret) return null; // not configured
+  const given = String((req.headers || {})["x-hub-signature-256"] || "");
+  const raw = Buffer.isBuffer(req.rawBody) ? req.rawBody
+    : typeof req.rawBody === "string" ? Buffer.from(req.rawBody)
+    : typeof req.body === "string" ? Buffer.from(req.body) : null;
+  if (!raw) { console.log("Signature: raw body not available, cannot check"); return null; }
+  const want = "sha256=" + crypto.createHmac("sha256", secret).update(raw).digest("hex");
+  const a = Buffer.from(given), b = Buffer.from(want);
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+  console.log("Signature: " + (ok ? "ok" : "MISMATCH"));
+  return ok;
+}
+
 module.exports = async (req, res) => {
   if (req.method === "GET") {
     // Meta checks the URL once when you save it in the dashboard.
@@ -590,6 +608,7 @@ module.exports = async (req, res) => {
     return;
   }
   if (req.method !== "POST") { res.status(405).send("Method not allowed"); return; }
+  if (signatureOk(req) === false && process.env.ENFORCE_SIGNATURE === "1") { res.status(401).send("Bad signature"); return; }
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
@@ -600,8 +619,12 @@ module.exports = async (req, res) => {
           const st = (value.statuses || []).map((x) => x.status + (x.errors ? " " + JSON.stringify(x.errors) : "")).join(", ");
           console.log("Webhook without message: field=" + change.field + (st ? " statuses=" + st : ""));
         }
-        for (const msg of value.messages || []) {
-          await handleMessage(msg);
+        if (!(value.messages || []).length) continue;
+        // The number that received the message decides which business answers.
+        const tenant = await store.tenantByPhoneId(value.metadata && value.metadata.phone_number_id);
+        if (!tenant) { console.log("Skipped: no active business for this WhatsApp number"); continue; }
+        for (const msg of value.messages) {
+          await store.run(tenant, () => handleMessage(msg));
         }
       }
     }

@@ -84,3 +84,16 @@ The owner can also set hours by WhatsApp. From a phone listed in `OWNER_NUMBERS`
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Which Claude model answers |
 | `GRAPH_VERSION` | `v25.0` | Meta API version |
 | `TIMEZONE` | `America/Panama` | Time zone for hours and dates |
+
+
+## Varios negocios
+
+- `/master` (contraseña maestra = `ADMIN_PASSWORD`): agregar, apagar y encender negocios.
+- Cada negocio entra a su página en `/admin?n=codigo` con su propia contraseña.
+- El número de WhatsApp que recibe el mensaje (Phone number ID) decide qué negocio responde.
+- El demo usa las variables de Vercel (`WHATSAPP_PHONE_NUMBER_ID`, `OWNER_NUMBERS`).
+
+## Firma de Meta
+
+Con `META_APP_SECRET` en Vercel, el servidor comprueba la firma de cada llamada y lo anota en el registro.
+Solo rechaza llamadas con firma mala si además está `ENFORCE_SIGNATURE=1`.

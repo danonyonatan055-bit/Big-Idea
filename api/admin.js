@@ -4,13 +4,32 @@ const crypto = require("crypto");
 const store = require("../lib/store");
 const mail = require("../lib/mail");
 
-function allowed(req) {
+function masterOk(given) {
   const expected = process.env.ADMIN_PASSWORD || "";
-  const given = String(req.headers["x-admin-password"] || "");
   if (!expected || expected.length < 8) return false;
-  const a = crypto.createHash("sha256").update(given).digest();
+  const a = crypto.createHash("sha256").update(String(given || "")).digest();
   const b = crypto.createHash("sha256").update(expected).digest();
   return crypto.timingSafeEqual(a, b);
+}
+
+// Each business enters with its own code and password. The master password opens any business.
+async function whoIs(req) {
+  const given = String(req.headers["x-admin-password"] || "");
+  const biz = String(req.headers["x-business"] || "").trim().toLowerCase();
+  const tenant = await store.findTenant(biz || "demo");
+  if (!tenant) return null;
+  if (masterOk(given)) return tenant;
+  if (tenant.id !== "demo" && store.checkPassword(given, tenant.pass)) return tenant;
+  return null;
+}
+
+// Slow down password guessing: 10 wrong tries per 10 minutes for each visitor.
+async function tooManyTries(req, failed) {
+  const ip = String(req.headers["x-forwarded-for"] || "x").split(",")[0].trim();
+  const k = "tries:" + ip;
+  const n = Number(await store.redis(["GET", k])) || 0;
+  if (failed) await store.redis(["SET", k, String(n + 1), "EX", "600"]);
+  return n >= 10;
 }
 
 function view(state) {
@@ -27,7 +46,22 @@ function view(state) {
 }
 
 module.exports = async (req, res) => {
-  if (!allowed(req)) { res.status(401).json({ error: "Contraseña incorrecta." }); return; }
+  let tenant = null;
+  try {
+    if (await tooManyTries(req, false)) { res.status(429).json({ error: "Demasiados intentos. Espera 10 minutos." }); return; }
+    tenant = await whoIs(req);
+    if (!tenant) { await tooManyTries(req, true); res.status(401).json({ error: "Código o contraseña incorrectos." }); return; }
+  } catch (err) {
+    console.error("Admin login error:", err);
+    res.status(500).json({ error: "No se pudo entrar. Intenta de nuevo." });
+    return;
+  }
+  return store.run(tenant, () => serve(req, res));
+};
+module.exports.masterOk = masterOk;
+module.exports.tooManyTries = tooManyTries;
+
+async function serve(req, res) {
   try {
     const state = await store.getState();
     store.pruneSlots(state);
@@ -61,9 +95,9 @@ module.exports = async (req, res) => {
         return;
       }
     }
-    res.status(200).json(view(state));
+    res.status(200).json(Object.assign(view(state), { business: store.current().id }));
   } catch (err) {
     console.error("Admin error:", err);
     res.status(500).json({ error: String(err.message || err) });
   }
-};
+}

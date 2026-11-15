@@ -39,6 +39,8 @@ li small { color:var(--muted); display:block; }
   <h1>Panel de la asistente</h1>
 
   <form id="login" class="card" autocomplete="off">
+    <label for="biz">Código del negocio</label>
+    <input id="biz" type="text" autocapitalize="none" placeholder="ejemplo: clinica-sonrisa (vacío = demo)">
     <label for="pw">Contraseña del negocio</label>
     <input id="pw" type="password" required>
     <button type="submit">Entrar</button>
@@ -106,6 +108,9 @@ li small { color:var(--muted); display:block; }
 <script>
 (function () {
   var pw = "";
+  var biz = "";
+  // A business opens its own link, for example /admin?n=clinica-sonrisa
+  try { document.getElementById("biz").value = new URLSearchParams(location.search).get("n") || ""; } catch (e) {}
   var $ = function (id) { return document.getElementById(id); };
   var status = $("status");
 
@@ -114,7 +119,7 @@ li small { color:var(--muted); display:block; }
   function api(method, body) {
     return fetch("/api/admin", {
       method: method,
-      headers: { "x-admin-password": pw, "Content-Type": "application/json" },
+      headers: { "x-admin-password": pw, "x-business": biz, "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined
     }).then(function (r) {
       return r.json().then(function (j) {
@@ -170,6 +175,7 @@ li small { color:var(--muted); display:block; }
   $("login").addEventListener("submit", function (e) {
     e.preventDefault();
     pw = $("pw").value;
+    biz = $("biz").value.trim().toLowerCase();
     api("GET").then(function (d) {
       $("login").hidden = true;
       $("panel").hidden = false;
