@@ -199,10 +199,21 @@ async function answer(state, history, text, phone, acts) {
   const messages = history.concat([{ role: "user", content: text }]);
   const made = [];
   const cancelled = [];
+  // The system prompt stays the same for the whole request. The model's reasoning blocks are tied
+  // to it, so changing it between tool calls makes the API reject the conversation.
+  const system = systemPrompt(state, phone, acts);
   for (let i = 0; i < 4; i++) {
-    const resp = await callClaude({
-      model: MODEL, max_tokens: 500, system: systemPrompt(state, phone, acts), tools: TOOLS, messages: messages
-    });
+    let resp;
+    try {
+      resp = await callClaude({ model: MODEL, max_tokens: 2000, system: system, tools: TOOLS, messages: messages });
+    } catch (err) {
+      // If a booking or cancellation already happened, the customer must still be told.
+      if (made.length || cancelled.length) {
+        console.error("Claude failed after an action; sending a built confirmation.", err);
+        return { text: summary(made, cancelled), made: made, cancelled: cancelled };
+      }
+      throw err;
+    }
     if (resp.stop_reason === "tool_use") {
       messages.push({ role: "assistant", content: resp.content });
       const results = [];
@@ -210,21 +221,26 @@ async function answer(state, history, text, phone, acts) {
         if (block.type !== "tool_use") continue;
         const isCancel = block.name === "cancelar_cita";
         const res = isCancel ? await cancel(block.input || {}, phone) : await book(block.input || {}, phone);
+        let payload;
         if (res.ok) {
           (isCancel ? cancelled : made).push(res.booking);
           acts.push(describe(isCancel ? "Cancelada" : "Reservada", res.booking));
+          const b = res.booking;
+          payload = {
+            ok: true,
+            resultado: isCancel ? "Cita cancelada. Esa hora quedó libre." : "Cita reservada y confirmada.",
+            servicio: b.service, dia: store.dayLabel(b.date), hora: store.fmt12(b.time), nombre: b.name
+          };
+        } else {
+          payload = { ok: false, error: res.error };
         }
-        results.push({
-          type: "tool_result", tool_use_id: block.id,
-          content: JSON.stringify(res.ok ? { ok: true } : { ok: false, error: res.error }),
-          is_error: !res.ok
-        });
+        results.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(payload), is_error: !res.ok });
       }
       messages.push({ role: "user", content: results });
-      state = await store.getState();
       continue;
     }
     const out = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    if (!out) console.error("Claude returned no text. stop_reason=" + resp.stop_reason);
     return { text: out || summary(made, cancelled), made: made, cancelled: cancelled };
   }
   return { text: summary(made, cancelled), made: made, cancelled: cancelled };
@@ -304,7 +320,13 @@ async function handleMessage(msg) {
     const acts = rawActs ? JSON.parse(rawActs) : [];
     const before = acts.length;
 
-    res = await answer(state, history, text, digits(from), acts);
+    try {
+      res = await answer(state, history, text, digits(from), acts);
+    } catch (err) {
+      console.error("Could not answer:", err);
+      await sendWhatsApp(from, "Tuvimos un problema técnico. Por favor escríbenos de nuevo en un momento.");
+      return;
+    }
     await sendWhatsApp(from, res.text);
     if (acts.length !== before) await store.redis(["SET", actsKey, JSON.stringify(acts.slice(-8)), "EX", "86400"]);
 
