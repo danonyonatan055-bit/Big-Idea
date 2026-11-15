@@ -159,7 +159,7 @@ li small { color:var(--muted); display:block; }
       var top = document.createElement("b");
       top.textContent = b.name + " · " + b.service;
       var sub = document.createElement("small");
-      sub.textContent = b.label + " · tel. " + (b.contact || b.phone);
+      sub.textContent = b.label + " · WhatsApp +" + b.phone;
       li.appendChild(top); li.appendChild(sub);
       list.appendChild(li);
     });

@@ -105,13 +105,15 @@ function systemPrompt(state, phone, acts) {
     "Reglas:",
     "- Si el cliente saluda o hace una pregunta simple (horario, dirección, precios, formas de pago, qué servicios hay), responde directo y breve con los datos del negocio. No empujes una cita en cada mensaje; ofrécela solo cuando tenga sentido.",
     "- Si es charla general o un mensaje corto como 'hola' o 'gracias', responde con amabilidad en una frase y pregunta en qué puedes ayudar.",
-    "- Para reservar necesitas: nombre completo, teléfono de contacto, servicio, fecha y hora. Pide lo que falte, una cosa a la vez.",
-    "- Antes de reservar pide SIEMPRE el nombre completo y el teléfono de contacto, aunque el cliente ya haya elegido la hora. Si ya los dio antes en este chat, confírmalos en una frase (por ejemplo: '¿La reservo a nombre de Ana Pérez, teléfono 6000-0000?') y espera su respuesta. Nunca inventes ni asumas el nombre o el teléfono.",
+    "- Para reservar necesitas: servicio, fecha, hora y nombre completo. Pide lo que falte, una cosa a la vez.",
+    "- Antes de reservar pide el nombre completo del cliente, a menos que ya lo haya dicho en este chat. Nunca inventes ni asumas el nombre.",
+    "- NO pidas teléfono: el negocio ya tiene el número de WhatsApp del cliente.",
+    "- En cuanto tengas servicio, fecha, hora y nombre, reserva de inmediato con agendar_cita. No hagas una pregunta extra de confirmación como '¿La reservo...?'.",
     "- Cuando tengas todo, usa la herramienta agendar_cita con la fecha (YYYY-MM-DD) y la hora (HH:MM) de la lista. Confirma la cita solo si la herramienta responde ok.",
     "- Una hora reservada deja de aparecer en la lista de disponibles. Si la hora está en las citas de este cliente, es suya y está confirmada: nunca digas que no estaba disponible ni que el equipo debe revisarla.",
     "- Tus mensajes anteriores sobre reservas y cancelaciones fueron correctos cuando los enviaste. NUNCA los corrijas, los contradigas ni te disculpes por ellos. Si una cita ya no aparece en la lista de AHORA, es porque se canceló, como dice la lista de acciones. Si una hora ya no aparece como disponible, es porque se reservó.",
     "- Si el cliente responde 'no', 'gracias' o algo parecido después de una reserva o cancelación, despídete con amabilidad en una frase. No agregues correcciones ni información nueva.",
-    "- Después de reservar, confirma siempre en un mensaje completo: servicio, día, hora, nombre y teléfono. Nunca respondas solo 'Listo'. No ofrezcas otras horas ni te disculpes.",
+    "- Después de reservar, confirma siempre en un mensaje completo, por ejemplo: 'Listo, tu cita quedó confirmada: limpieza dental, domingo 15 de noviembre a la 1:00 p. m., a nombre de Ana Pérez.' Incluye servicio, día, hora y nombre. Nunca respondas solo 'Listo'. No ofrezcas otras horas ni te disculpes.",
     "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
     "- Si piden una hora que no está en la lista, o no hay horas, di que el equipo le escribirá cuando abra.",
@@ -127,12 +129,11 @@ const TOOLS = [{
     type: "object",
     properties: {
       nombre: { type: "string", description: "Nombre completo del cliente, dicho por el cliente" },
-      telefono: { type: "string", description: "Teléfono de contacto del cliente, dicho o confirmado por el cliente" },
       servicio: { type: "string", description: "Servicio solicitado" },
       fecha: { type: "string", description: "Fecha en formato YYYY-MM-DD" },
       hora: { type: "string", description: "Hora en formato HH:MM" }
     },
-    required: ["nombre", "telefono", "servicio", "fecha", "hora"]
+    required: ["nombre", "servicio", "fecha", "hora"]
   }
 }, {
   name: "cancelar_cita",
@@ -150,9 +151,7 @@ const TOOLS = [{
 async function book(input, phone) {
   // Read the latest state right before booking so two chats cannot take the same hour.
   const nombre = String(input.nombre || "").trim();
-  const contacto = digits(input.telefono);
   if (nombre.length < 2) return { ok: false, error: "Falta el nombre completo. Pídelo al cliente antes de reservar." };
-  if (contacto.length < 7) return { ok: false, error: "Falta un teléfono de contacto válido. Pídelo al cliente antes de reservar." };
   const state = await store.getState();
   const fecha = String(input.fecha || "").trim();
   let hora = String(input.hora || "").trim();
@@ -164,7 +163,7 @@ async function book(input, phone) {
   const booking = {
     name: nombre,
     service: String(input.servicio || "Cita"),
-    date: fecha, time: hora, phone: phone, contact: contacto, at: new Date().toISOString()
+    date: fecha, time: hora, phone: phone, at: new Date().toISOString()
   };
   state.bookings.push(booking);
   await store.saveState(state);
@@ -175,8 +174,8 @@ async function book(input, phone) {
 function summary(made, cancelled) {
   const lines = [];
   cancelled.forEach((b) => lines.push("Tu cita de " + b.service + " del " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) + " quedó cancelada."));
-  made.forEach((b) => lines.push("Tu cita quedó reservada: " + b.service + ", " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) +
-    ", a nombre de " + b.name + ", teléfono " + (b.contact || b.phone) + "."));
+  made.forEach((b) => lines.push("Listo, tu cita quedó confirmada: " + b.service + ", " + store.dayLabel(b.date) + " a las " + store.fmt12(b.time) +
+    ", a nombre de " + b.name + "."));
   return lines.length ? lines.join("\n") : "Perdona, no te entendí bien. ¿Me lo repites, por favor?";
 }
 
@@ -322,13 +321,13 @@ async function handleMessage(msg) {
       await notifyBusiness(fresh,
         "Cita cancelada: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
         "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
-        "\nTeléfono: " + (b.contact || b.phone) + "\nWhatsApp: " + b.phone + "\n\nEsa hora quedó libre otra vez.");
+        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora quedó libre otra vez.");
     }
     for (const b of res.made) {
       await notifyBusiness(fresh,
         "Nueva cita: " + b.name + " · " + store.dayLabel(b.date) + ", " + store.fmt12(b.time),
         "Cliente: " + b.name + "\nServicio: " + b.service + "\nDía y hora: " + store.dayLabel(b.date) + ", " + store.fmt12(b.time) +
-        "\nTeléfono: " + (b.contact || b.phone) + "\nWhatsApp: " + b.phone + "\n\nEsa hora ya no se ofrece a otros clientes.");
+        "\nWhatsApp del cliente: +" + b.phone + "\n\nEsa hora ya no se ofrece a otros clientes.");
     }
   }
 }
