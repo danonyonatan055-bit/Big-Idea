@@ -159,7 +159,8 @@ function systemPrompt(state, phone, acts) {
     "- Después de reservar, confirma siempre en un mensaje completo, por ejemplo: 'Listo, tu cita quedó confirmada: limpieza dental, domingo 15 de noviembre a la 1:00 p. m., a nombre de Ana Pérez.' Incluye servicio, día, hora y nombre. Nunca respondas solo 'Listo'. No ofrezcas otras horas ni te disculpes.",
     "- Si el cliente quiere cancelar una de sus citas, usa la herramienta cancelar_cita. Si responde ok, confirma con amabilidad que la cita quedó cancelada. Si tiene varias citas y no dice cuál, pregunta cuál.",
     "- Si el cliente quiere cambiar la hora de su cita, primero cancela la cita actual con cancelar_cita y luego reserva la nueva con agendar_cita.",
-    "- Si piden una hora que no está en la lista, o no hay horas, di que el equipo le escribirá cuando abra.",
+    "- Si piden una hora que no está en la lista, es porque ya está reservada o el negocio no atiende a esa hora: di con amabilidad que esa hora ya no está disponible y ofrece las que sí están libres. Solo si no queda ninguna hora libre, di que el equipo le escribirá cuando abra.",
+    "- Si agendar_cita responde que otro cliente acaba de reservar esa hora, discúlpate ('Perdona, esa hora la acaban de reservar') y ofrece las horas libres que te da la herramienta.",
     "- Si no sabes algo, di que el equipo responderá cuando abra. No inventes precios, horas ni datos.",
     "- Usa sentido común, como una buena recepcionista humana. Entiende mensajes con errores de escritura, abreviaturas y respuestas cortas ('si', 'ok', 'dale', 'esa', 'la primera', 'a la 1') según lo último que se habló en el chat.",
     "- Si el cliente da varios datos en un solo mensaje, úsalos todos; no vuelvas a preguntar algo que ya dijo.",
@@ -196,7 +197,29 @@ const TOOLS = [{
   }
 }];
 
-async function book(input, phone) {
+// Only one booking or cancellation runs at a time, so two customers can never get the same hour.
+async function withStateLock(fn) {
+  let got = null;
+  for (let i = 0; i < 40 && got === null; i++) {
+    got = await store.redis(["SET", "lock:state", "1", "NX", "EX", "10"]);
+    if (got === null) await wait(150);
+  }
+  try { return await fn(); } finally { if (got !== null) await store.redis(["DEL", "lock:state"]); }
+}
+
+function freeList(state) {
+  const t = store.now();
+  const free = state.slots.filter((s) => !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)))
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  return free.length
+    ? free.map((s) => s.date + " " + s.time + " (" + store.dayLabel(s.date) + ", " + store.fmt12(s.time) + ")").join("; ")
+    : "ninguna";
+}
+
+function book(input, phone) { return withStateLock(() => bookNow(input, phone)); }
+function cancel(input, phone) { return withStateLock(() => cancelNow(input, phone)); }
+
+async function bookNow(input, phone) {
   // Read the latest state right before booking so two chats cannot take the same hour.
   const nombre = String(input.nombre || "").trim();
   if (nombre.length < 2) return { ok: false, error: "Falta el nombre completo. Pídelo al cliente antes de reservar." };
@@ -215,12 +238,12 @@ async function book(input, phone) {
     const same = state.slots.filter((s) => s.time === hora && !s.taken && (s.date > t.date || (s.date === t.date && s.time > t.time)));
     if (same.length === 1) slot = same[0];
   }
-  if (!slot) return { ok: false, error: "Esa hora no está en la lista. Ofrece una de las disponibles." };
+  if (!slot) return { ok: false, error: "Esa hora no está disponible. Dilo con amabilidad y ofrece las horas libres AHORA: " + freeList(state) + "." };
   if (slot.taken) {
     // The same customer asking again for the hour they already have: it is theirs.
     const own = state.bookings.find((b) => b.phone === phone && b.date === slot.date && b.time === slot.time);
     if (own) return { ok: true, booking: own, already: true };
-    return { ok: false, error: "Esa hora ya está reservada. Ofrece otra." };
+    return { ok: false, error: "Otro cliente acaba de reservar esa hora. Discúlpate en una frase ('Perdona, esa hora la acaban de reservar') y ofrece las horas libres AHORA: " + freeList(state) + ". Si no hay ninguna, di que el equipo le escribirá cuando abra." };
   }
   slot.taken = true;
   const booking = {
@@ -242,7 +265,7 @@ function summary(made, cancelled) {
   return lines.join("\n");
 }
 
-async function cancel(input, phone) {
+async function cancelNow(input, phone) {
   const state = await store.getState();
   const fecha = String(input.fecha || "").trim();
   let hora = String(input.hora || "").trim();
